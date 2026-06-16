@@ -37,13 +37,8 @@ dev = [
 [project.scripts]
 hermes-companion = "companion_cli:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["server*"]
-
-[tool.setuptools.package-data]
-"server" = ["*.py"]
-"" = ["hermes-companion-user.service"]
+[tool.setuptools]
+py-modules = ["server", "companion_cli", "config", "config_schema", "first_run", "setup_wizard"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

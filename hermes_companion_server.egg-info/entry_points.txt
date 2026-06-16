@@ -1,0 +1,2 @@
+[console_scripts]
+hermes-companion = companion_cli:main

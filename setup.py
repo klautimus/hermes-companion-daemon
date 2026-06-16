@@ -16,10 +16,9 @@ setup(
     author_email="community@hermes-agent.nousresearch.com",
     license="MIT",
     python_requires=">=3.10",
-    packages=find_packages(include=["server*"]),
-    package_data={
-        "": ["hermes-companion-user.service"],
-    },
+    py_modules=["server", "companion_cli", "config", "config_schema", "first_run", "setup_wizard"],
+    # package_data removed — systemd service file is installed manually
+    # and root-level modules are declared via py_modules above
     install_requires=[
         "aiohttp>=3.9",
         "pyyaml>=6.0",

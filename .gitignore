@@ -19,3 +19,4 @@ attachments/
 
 # Logs
 *.log
+.venv-audit/

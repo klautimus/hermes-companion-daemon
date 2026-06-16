@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: hermes-companion-server
+Version: 1.0.0
+Summary: Hermes Companion Server — HTTP shim for Hermes API + Kanban CLI
+Author-email: Kevin Atlas <kevin.douglas.disher@gmail.com>
+License: MIT
+Keywords: hermes,companion,kanban,api,server
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Internet :: WWW/HTTP :: HTTP Servers
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: aiohttp>=3.9
+Requires-Dist: PyYAML>=6.0
+Provides-Extra: qr
+Requires-Dist: segno>=1.6; extra == "qr"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
+Requires-Dist: pytest-timeout>=2.3; extra == "dev"

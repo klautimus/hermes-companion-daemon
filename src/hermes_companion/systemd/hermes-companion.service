@@ -1,0 +1,12 @@
+[Unit]
+Description=Hermes Companion Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={{PYTHON_PATH}} -c "from hermes_companion.server import main; main()"
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from aiohttp import web, ClientSession, ClientTimeout
 
 # ── Config ──────────────────────────────────────────────────
-from .config_schema import load_config
-from .first_run import ensure_configured_or_exit
+from config_schema import load_config
+from first_run import ensure_configured_or_exit
 
 # Load config (handles first-run check, env overrides, YAML file)
 ensure_configured_or_exit()

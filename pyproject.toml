@@ -46,7 +46,7 @@ include = ["server*"]
 "" = ["hermes-companion-user.service"]
 
 [tool.pytest.ini_options]
-testpaths = ["server"]
+testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
 addopts = "-v"

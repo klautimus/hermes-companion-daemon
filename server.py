@@ -10,6 +10,7 @@ Provides:
 
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import mimetypes
@@ -57,6 +58,10 @@ class BasicAuth:
         self._file = auth_file
         self._users: dict = {}
         self._mtime: float = 0.0
+        # Brute-force tracking: key = (username, client_ip) -> (fail_count, locked_until_monotonic)
+        self._failures: dict = {}
+        self._max_failures: int = 5
+        self._lockout_seconds: int = 60
         self._reload()
 
     def _reload(self):
@@ -70,8 +75,19 @@ class BasicAuth:
         except Exception as e:
             logger.error("Failed to load auth.json: %s", e)
 
+    def _record_failure(self, key):
+        count, until = self._failures.get(key, (0, 0.0))
+        count += 1
+        if count >= self._max_failures:
+            until = time.monotonic() + self._lockout_seconds
+        self._failures[key] = (count, until)
+
+    def _clear_failures(self, key):
+        self._failures.pop(key, None)
+
     async def check(self, request: web.Request) -> bool:
         self._reload()
+        client_ip = request.remote or "unknown"
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Basic "):
             return False
@@ -80,12 +96,34 @@ class BasicAuth:
             username, _, password = decoded.partition(":")
         except Exception:
             return False
+
+        # Lockout check (per username + IP)
+        key = (username, client_ip)
+        fail = self._failures.get(key)
+        if fail and time.monotonic() < fail[1]:
+            return False
+
         user = self._users.get(username)
         if not user:
+            # Equalize timing: dummy scrypt so timing doesn't reveal username existence
+            try:
+                hashlib.scrypt(
+                    password.encode(), salt=b"\x00" * 16, n=16384, r=8, p=1, dklen=32,
+                )
+            except Exception:
+                pass
+            self._record_failure(key)
             return False
+
         phash = user.get("password_hash", "")
         if not phash.startswith("scrypt$"):
-            return phash == password
+            # Plaintext fallback — constant-time compare
+            if hmac.compare_digest(phash, password):
+                self._clear_failures(key)
+                return True
+            self._record_failure(key)
+            return False
+
         try:
             _, n, r, p, salt_hex, expected = phash.split("$", 5)
             n, r, p = int(n), int(r), int(p)
@@ -93,9 +131,35 @@ class BasicAuth:
             hash_bytes = hashlib.scrypt(
                 password.encode(), salt=salt_bytes, n=n, r=r, p=p, dklen=32,
             )
-            return base64.b64encode(hash_bytes).decode() == expected
-        except Exception:
+            computed = base64.b64encode(hash_bytes).decode()
+            if hmac.compare_digest(computed, expected):
+                self._clear_failures(key)
+                # Transparent hash upgrade: if N < 131072, re-hash with stronger params
+                if n < 131072:
+                    await self._upgrade_hash(username, password)
+                return True
+            self._record_failure(key)
             return False
+        except Exception:
+            self._record_failure(key)
+            return False
+
+    async def _upgrade_hash(self, username: str, password: str):
+        """Re-hash password with N=131072 and update auth.json."""
+        import os as _os
+        try:
+            new_salt = _os.urandom(16)
+            new_hash = hashlib.scrypt(
+                password.encode(), salt=new_salt, n=131072, r=8, p=1, dklen=32,
+            )
+            new_phash = f"scrypt$131072$8$1${new_salt.hex()}${base64.b64encode(new_hash).decode()}"
+            raw = json.loads(self._file.read_text())
+            raw["users"][username]["password_hash"] = new_phash
+            self._file.write_text(json.dumps(raw, indent=2))
+            self._mtime = 0  # force reload on next check
+            logger.info("Upgraded hash for user %s to N=131072", username)
+        except Exception as e:
+            logger.warning("Failed to upgrade hash for %s: %s", username, e)
 
     @web.middleware
     async def middleware(self, request, handler):

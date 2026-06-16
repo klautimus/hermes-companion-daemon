@@ -37,7 +37,7 @@ except ImportError:
 
 
 # ── Constants ──────────────────────────────────────────────────
-SCRYPT_N = 16384
+SCRYPT_N = 131072
 SCRYPT_R = 8
 SCRYPT_P = 1
 SCRYPT_DKLEN = 32

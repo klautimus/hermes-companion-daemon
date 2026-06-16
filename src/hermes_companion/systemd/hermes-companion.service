@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={{PYTHON_PATH}} -c "from hermes_companion.server import main; main()"
+ExecStart=/usr/bin/env python3 -m companion_cli serve
 Restart=on-failure
 RestartSec=5
 

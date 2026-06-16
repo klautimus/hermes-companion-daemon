@@ -35,7 +35,7 @@ dev = [
 ]
 
 [project.scripts]
-hermes-companion = "server.cli:main"
+hermes-companion = "companion_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

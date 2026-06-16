@@ -34,7 +34,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "hermes-companion = server.cli:main",
+            "hermes-companion = companion_cli:main",
         ],
     },
     classifiers=[

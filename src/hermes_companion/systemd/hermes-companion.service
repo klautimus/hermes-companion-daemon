@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env python3 -m companion_cli serve
+ExecStart=/usr/bin/env python3 /home/kevin/.hermes/companion/companion_cli.py serve
+WorkingDirectory=/home/kevin/.hermes/companion
 Restart=on-failure
 RestartSec=5
 

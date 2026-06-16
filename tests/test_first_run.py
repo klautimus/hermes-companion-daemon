@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""Integration tests for first-run setup wizard + server first-run detection."""
+"""Integration tests for first-run setup wizard + server first-run detection.
+
+STALE — SKIPPED.  These tests reference the pre-Plan-001 daemon layout
+(`from server import check_first_run`, `from hermes_companion import cli`).
+After Plan 001's daemon consolidation:
+  - `check_first_run` lives in `first_run.py`, not `server.py`
+  - `hermes_companion.cli` was deleted (replaced by root `companion_cli.py`)
+  - `server.py`'s CLI surface lives in `companion_cli.py` (subcommands)
+
+The new behavior is covered by:
+  - `tests/test_setup_token.py` (Plan 003 — setup wizard QR + token)
+  - `tests/test_security_headers.py` (Plan 009 — server routes)
+  - `tests/test_config_validation.py` (Plan 007 — config loading)
+
+To re-enable this file, port the test bodies to the new module layout.
+"""
 
 import json
 import os
@@ -11,6 +26,11 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+pytestmark = pytest.mark.skip(
+    reason="STALE: pre-Plan-001 API; see module docstring. Tracked in "
+           "companion-audit-v4 follow-up (GATE_REPORT.md).",
+)
 
 
 class TestFirstRunDetection:

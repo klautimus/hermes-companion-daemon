@@ -25,8 +25,8 @@ from datetime import datetime, timezone
 from aiohttp import web, ClientSession, ClientTimeout
 
 # ── Config ──────────────────────────────────────────────────
-from .config_schema import load_config
-from .first_run import ensure_configured_or_exit
+from config_schema import load_config
+from first_run import ensure_configured_or_exit
 
 # Load config (handles first-run check, env overrides, YAML file)
 ensure_configured_or_exit()
@@ -214,6 +214,32 @@ class BasicAuth:
                 status=401,
             )
         return await handler(request)
+
+
+# ── Security Headers Middleware ───────────────────────────────
+@web.middleware
+async def security_headers_middleware(request: web.Request, handler):
+    response: web.StreamResponse = await handler(request)
+    # Skip headers for streaming/SSE responses (already set by handler)
+    if not isinstance(response, web.Response):
+        return response
+    # Set headers only if not already set by the handler
+    if "Content-Security-Policy" not in response.headers:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'"
+        )
+    if "X-Frame-Options" not in response.headers:
+        response.headers["X-Frame-Options"] = "DENY"
+    if "X-Content-Type-Options" not in response.headers:
+        response.headers["X-Content-Type-Options"] = "nosniff"
+    if "Referrer-Policy" not in response.headers:
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if "Permissions-Policy" not in response.headers:
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    return response
 
 
 # ── Hermes API Proxy ─────────────────────────────────────────
@@ -676,7 +702,7 @@ async def handle_setup_redeem(request):
 # ── App Setup ────────────────────────────────────────────────
 async def create_app() -> web.Application:
     auth = BasicAuth(AUTH_FILE)
-    app = web.Application(middlewares=[auth.middleware])
+    app = web.Application(middlewares=[auth.middleware, security_headers_middleware])
 
     # Health
     app.router.add_get("/healthz", handle_healthz)

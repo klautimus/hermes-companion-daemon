@@ -1,6 +1,0 @@
-companion_cli
-config
-config_schema
-first_run
-server
-setup_wizard

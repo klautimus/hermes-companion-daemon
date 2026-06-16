@@ -20,3 +20,4 @@ attachments/
 # Logs
 *.log
 .venv-audit/
+*.egg-info/

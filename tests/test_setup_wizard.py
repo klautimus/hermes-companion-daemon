@@ -1,29 +1,14 @@
 #!/usr/bin/env python3
 """Tests for the setup wizard (setup_wizard.py).
 
-STALE — SKIPPED.  These tests import functions that do not exist in the
-post-Plan-001 consolidated root `setup_wizard.py`:
-
-  - `create_auth_json`     — actual name: `create_auth_file` (takes config object)
-  - `create_config_yaml`   — never existed; config save is inlined
-  - `generate_connection_uri` — never existed; QR data is the connection URI
-  - `generate_qr_code_no_segno` — never existed; uses `qrcode` lib
-  - `_non_interactive_setup` — never existed
-  - `prompt` (singular)     — actual names: `prompt_with_default`, `prompt_yes_no`
-  - `run_wizard`             — actual name: `run_setup_wizard`
-  - `main`                   — `setup_wizard.py` has no top-level `main`
-
-The new behavior is covered by:
-  - `tests/test_setup_token.py` (Plan 003 — QR + setup_token flow)
-  - `tests/test_auth_hardening.py` (Plan 002 — scrypt + auth state)
-
-To re-enable this file, port the test bodies to the consolidated API.
+Ported to the post-Plan-001 consolidated API. Covers security-critical
+code paths: scrypt hashing, auth file creation, QR token generation,
+first-run detection, and CLI entry points.
 """
 
 import json
 import os
 import sys
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,38 +17,21 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Defer the failing imports to collection-time so the module can be
-# collected and individual tests can be marked skipped. If any of the
-# legacy symbols are missing, we skip the whole module with a clear reason.
-try:
-    from setup_wizard import (
-        generate_password,
-        hash_password,
-        create_auth_json,
-        create_config_yaml,
-        detect_hermes_binary,
-        generate_connection_uri,
-        generate_qr_code_no_segno,
-        prompt,
-        prompt_yes_no,
-        run_wizard,
-        _non_interactive_setup,
-        main,
-    )
-    _LEGACY_IMPORTS_OK = True
-    _SKIP_REASON = None
-except ImportError as _exc:
-    _LEGACY_IMPORTS_OK = False
-    _SKIP_REASON = (
-        f"STALE: legacy setup_wizard API not available post-Plan-001: {_exc}. "
-        f"See module docstring. Tracked in companion-audit-v4 follow-up "
-        f"(GATE_REPORT.md)."
-    )
-
-pytestmark = pytest.mark.skipif(
-    not _LEGACY_IMPORTS_OK,
-    reason=_SKIP_REASON or "STALE: pre-Plan-001 API",
+from setup_wizard import (
+    generate_password,
+    generate_setup_token,
+    hash_password,
+    create_auth_file,
+    detect_hermes_cli,
+    generate_qr_code,
+    render_qr_ascii,
+    save_qr_png,
+    register_setup_token_wizard,
+    run_setup_wizard,
+    prompt_with_default,
+    prompt_yes_no,
 )
+from config_schema import CompanionConfig, DEFAULT_CONFIG, save_config, CONFIG_DIR, CONFIG_FILE, load_config, config_exists
 
 
 # ── Password generation ─────────────────────────────────────────
@@ -74,13 +42,14 @@ class TestGeneratePassword:
         assert isinstance(pw, str)
 
     def test_default_length(self):
-        pw = generate_password(32)
+        pw = generate_password()
         # token_urlsafe(32) produces ~43 chars
         assert len(pw) >= 32
 
     def test_custom_length(self):
-        pw = generate_password(16)
-        assert len(pw) >= 16
+        # New API doesn't take length param; just verify it's long enough
+        pw = generate_password()
+        assert len(pw) >= 32
 
     def test_unique_each_time(self):
         pw1 = generate_password()
@@ -100,7 +69,7 @@ class TestHashPassword:
         parts = h.split("$")
         assert len(parts) == 6
         assert parts[0] == "scrypt"
-        assert parts[1] == "16384"  # N
+        assert parts[1] == "131072"  # N (updated from Plan 002)
         assert parts[2] == "8"       # r
         assert parts[3] == "1"       # p
         # parts[4] is salt hex, parts[5] is hash b64
@@ -115,9 +84,10 @@ class TestHashPassword:
         h2 = hash_password("same")
         assert h1 != h2  # Different random salts
 
-    def test_custom_params(self):
-        h = hash_password("test", n=8192, r=4, p=2)
-        assert h.startswith("scrypt$8192$4$2$")
+    def test_fixed_params(self):
+        # New API uses fixed SCRYPT_N/R/P from constants
+        h = hash_password("test")
+        assert h.startswith("scrypt$131072$8$1$")
 
 
 # ── Auth.json creation ──────────────────────────────────────────

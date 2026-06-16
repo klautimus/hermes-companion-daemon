@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import aiohttp
 
 # Add parent dir for direct imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -224,3 +225,70 @@ class TestTokenFileLoading:
         assert "old-token" not in _server_mod._SETUP_TOKENS
         # File still deleted even if all tokens expired
         assert not token_file.exists()
+
+
+# ── Concurrent redeem ─────────────────────────────────────────
+
+class TestConcurrentRedeem:
+    """Test that concurrent /api/setup/redeem requests with the same token
+    result in exactly one 200 and one 404 (single-use guarantee)."""
+
+    def setup_method(self):
+        _server_mod._SETUP_TOKENS.clear()
+
+    def teardown_method(self):
+        _server_mod._SETUP_TOKENS.clear()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_redeem_only_one_succeeds(self, tmp_path):
+        """Two concurrent POST /api/setup/redeem with the same token should
+        result in exactly one 200 response and one 404."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        # Create a minimal auth file so BasicAuth doesn't crash
+        auth_file = tmp_path / "auth.json"
+        import hashlib, base64
+        password = "testpw"
+        # auth.json format: {"users": {"admin": {"password_hash": ..., "salt": ..., "role": "admin"}}}
+        # Use the BasicAuth._hash method pattern: HMAC-SHA256
+        import os
+        salt = base64.b64encode(os.urandom(16)).decode()
+        pw_hash = base64.b64encode(
+            _hmac.new(salt.encode(), password.encode(), hashlib.sha256).digest()
+        ).decode()
+        auth_file.write_text(json.dumps({
+            "users": {
+                "admin": {"password_hash": pw_hash, "salt": salt, "role": "admin"}
+            }
+        }))
+
+        # Patch _config and AUTH_FILE so create_app() works
+        _server_mod._config = {"auth": {"file_path": str(auth_file)}}
+        _server_mod.AUTH_FILE = auth_file
+
+        # Register a token
+        await _server_mod.register_setup_token(
+            "concurrent-token", "alice", "secret", "default", 300
+        )
+
+        # Create the app and test client
+        app = await _server_mod.create_app()
+        async with TestClient(TestServer(app)) as client:
+            async def redeem():
+                return await client.post(
+                    "/api/setup/redeem",
+                    json={"token": "concurrent-token"},
+                    auth=aiohttp.BasicAuth("admin", password),
+                )
+
+            r1, r2 = await asyncio.gather(redeem(), redeem())
+
+        statuses = sorted([r1.status, r2.status])
+        assert statuses == [200, 404], f"Expected [200, 404], got {statuses}"
+
+        # The 200 response should contain credentials
+        ok_resp = r1 if r1.status == 200 else r2
+        data = await ok_resp.json()
+        assert data["username"] == "alice"
+        assert data["password"] == "secret"
+        assert data["board"] == "default"

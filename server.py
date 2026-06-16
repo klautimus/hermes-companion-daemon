@@ -8,6 +8,7 @@ Provides:
   - Health endpoint (/healthz)
 """
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -54,19 +55,27 @@ STARTED_AT = time.monotonic()
 # ── Setup Token Store ─────────────────────────────────────────
 # One-time setup tokens. Each entry: {"username": str, "password": str, "board": str, "expires_at": float}
 _SETUP_TOKENS: dict[str, dict] = {}
+_setup_tokens_lock: asyncio.Lock = asyncio.Lock()
 
 
-def register_setup_token(token: str, username: str, password: str, board: str = "default", ttl_seconds: int = 300):
-    _SETUP_TOKENS[token] = {
-        "username": username,
-        "password": password,
-        "board": board,
-        "expires_at": time.monotonic() + ttl_seconds,
-    }
+async def register_setup_token(token: str, username: str, password: str, board: str = "default", ttl_seconds: int = 300):
+    async with _setup_tokens_lock:
+        _SETUP_TOKENS[token] = {
+            "username": username,
+            "password": password,
+            "board": board,
+            "expires_at": time.monotonic() + ttl_seconds,
+        }
 
 
 def _load_setup_tokens_from_disk():
-    """Load setup tokens from a file written by the setup wizard, then delete the file."""
+    """Load setup tokens from a file written by the setup wizard, then delete the file.
+
+    NOTE: This is a sync function and cannot acquire _setup_tokens_lock.
+    It only runs at startup before the server accepts requests, so the
+    race window is acceptable. If this is ever called after the server
+    is listening, a lock would be needed.
+    """
     try:
         config_path = Path(_config["auth"]["file_path"]).parent
         token_file = config_path / "setup_token.json"
@@ -681,7 +690,14 @@ async def handle_setup_redeem(request):
             {"error": {"code": "VALIDATION_ERROR", "message": "token required"}},
             status=422,
         )
-    entry = _SETUP_TOKENS.pop(token, None)  # single-use: pop removes
+
+    # Atomic check + pop inside the lock. This guarantees single-use
+    # semantics even with concurrent requests: the pop happens at most once
+    # for a given token, and the second concurrent caller sees the entry
+    # already gone.
+    async with _setup_tokens_lock:
+        entry = _SETUP_TOKENS.pop(token, None)
+
     if entry is None:
         return web.json_response(
             {"error": {"code": "NOT_FOUND", "message": "token invalid or already used"}},

@@ -293,6 +293,33 @@ Serve an uploaded attachment.
 
 ---
 
+## Security Headers
+
+All responses include the following HTTP security headers:
+
+| Header | Value |
+|--------|-------|
+| `Content-Security-Policy` | `default-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'` |
+| `X-Frame-Options` | `DENY` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Permissions-Policy` | `geolocation=(), microphone=(), camera=()` |
+
+Handlers may override these by setting the header in their response. HSTS is
+not emitted because the daemon speaks HTTP behind a TLS-terminating proxy
+(Cloudflare). The proxy emits HSTS in production.
+
+## CORS
+
+The daemon does NOT implement CORS. It is designed for server-to-server
+use (Android client via OkHttp + Hermes API). If a web UI is added in the
+future, CORS must be configured with EXPLICIT allowed origins (never
+`Access-Control-Allow-Origin: *` with `Access-Control-Allow-Credentials: true`).
+The recommended pattern is `aiohttp_cors` with an allow-list of origins,
+each with `allow_credentials=True` only if the origin is trusted.
+
+---
+
 ## Error Codes
 
 | HTTP | Code | Meaning |

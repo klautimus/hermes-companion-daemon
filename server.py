@@ -574,14 +574,22 @@ async def handle_attachment_upload(request: web.Request) -> web.Response:
     if not filename:
         filename = "upload"
     content_type = file_field.headers.get("Content-Type", "application/octet-stream")
-    data = await file_field.read()
-
-    # F-08 FIX: Upload size limit
-    if len(data) > MAX_UPLOAD_SIZE:
-        return web.json_response(
-            {"error": {"code": "VALIDATION_ERROR", "message": f"file exceeds {MAX_UPLOAD_SIZE // (1024*1024)}MB limit"}},
-            status=422,
-        )
+    # Stream read with early size enforcement
+    CHUNK_SIZE = 64 * 1024  # 64 KB
+    data_chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file_field.read_chunk(size=CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_SIZE:
+            return web.json_response(
+                {"error": {"code": "VALIDATION_ERROR", "message": f"file exceeds {MAX_UPLOAD_SIZE // (1024*1024)}MB limit"}},
+                status=413,  # Payload Too Large
+            )
+        data_chunks.append(chunk)
+    data = b"".join(data_chunks)
 
     # Save to attachments directory
     ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)

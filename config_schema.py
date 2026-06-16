@@ -7,6 +7,32 @@ import yaml
 import os
 
 
+def _coerce_int(value, field_name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"config field '{field_name}' must be int, got {type(value).__name__}: {value!r}")
+
+
+def _coerce_str(value, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"config field '{field_name}' must be str, got {type(value).__name__}: {value!r}")
+    return value
+
+
+def _coerce_bool(value, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.lower() in ("true", "yes", "1"):
+            return True
+        if value.lower() in ("false", "no", "0"):
+            return False
+    if isinstance(value, int):
+        return bool(value)
+    raise ValueError(f"config field '{field_name}' must be bool, got {type(value).__name__}: {value!r}")
+
+
 @dataclass
 class ServerConfig:
     host: str = "127.0.0.1"
@@ -56,23 +82,71 @@ class CompanionConfig:
     @classmethod
     def from_dict(cls, data: dict) -> "CompanionConfig":
         cfg = cls()
+        errors = []
         if "server" in data:
-            cfg.server.host = data["server"].get("host", cfg.server.host)
-            cfg.server.port = data["server"].get("port", cfg.server.port)
+            s = data["server"]
+            if "host" in s:
+                try:
+                    cfg.server.host = _coerce_str(s["host"], "server.host")
+                except ValueError as e:
+                    errors.append(str(e))
+            if "port" in s:
+                try:
+                    cfg.server.port = _coerce_int(s["port"], "server.port")
+                except ValueError as e:
+                    errors.append(str(e))
         if "hermes" in data:
-            cfg.hermes.api_url = data["hermes"].get("api_url", cfg.hermes.api_url)
-            cfg.hermes.api_key = data["hermes"].get("api_key", cfg.hermes.api_key)
-            cfg.hermes.cli_path = data["hermes"].get("cli_path", cfg.hermes.cli_path)
+            h = data["hermes"]
+            if "api_url" in h:
+                try:
+                    cfg.hermes.api_url = _coerce_str(h["api_url"], "hermes.api_url")
+                except ValueError as e:
+                    errors.append(str(e))
+            if "api_key" in h:
+                try:
+                    cfg.hermes.api_key = _coerce_str(h["api_key"], "hermes.api_key")
+                except ValueError as e:
+                    errors.append(str(e))
+            if "cli_path" in h:
+                try:
+                    cfg.hermes.cli_path = _coerce_str(h["cli_path"], "hermes.cli_path")
+                except ValueError as e:
+                    errors.append(str(e))
         if "auth" in data:
-            cfg.auth.file = data["auth"].get("file", cfg.auth.file)
+            a = data["auth"]
+            if "file" in a:
+                try:
+                    cfg.auth.file = _coerce_str(a["file"], "auth.file")
+                except ValueError as e:
+                    errors.append(str(e))
         if "storage" in data:
-            cfg.storage.attachments_dir = data["storage"].get(
-                "attachments_dir", cfg.storage.attachments_dir
-            )
-            cfg.storage.max_upload_size = data["storage"].get(
-                "max_upload_size", cfg.storage.max_upload_size
-            )
+            st = data["storage"]
+            if "attachments_dir" in st:
+                try:
+                    cfg.storage.attachments_dir = _coerce_str(st["attachments_dir"], "storage.attachments_dir")
+                except ValueError as e:
+                    errors.append(str(e))
+            if "max_upload_size" in st:
+                try:
+                    cfg.storage.max_upload_size = _coerce_int(st["max_upload_size"], "storage.max_upload_size")
+                except ValueError as e:
+                    errors.append(str(e))
+        if errors:
+            raise ValueError("config validation errors:\n  " + "\n  ".join(errors))
         return cfg
+
+    def validate(self) -> list[str]:
+        """Return a list of validation errors (empty if valid)."""
+        errors = []
+        if not (1 <= self.server.port <= 65535):
+            errors.append(f"server.port must be 1-65535, got {self.server.port}")
+        if not self.hermes.api_url.startswith(("http://", "https://")):
+            errors.append(f"hermes.api_url must start with http:// or https://, got {self.hermes.api_url!r}")
+        if self.storage.max_upload_size <= 0:
+            errors.append(f"storage.max_upload_size must be positive, got {self.storage.max_upload_size}")
+        if self.storage.max_upload_size > 1024 * 1024 * 1024:  # 1 GB
+            errors.append(f"storage.max_upload_size exceeds 1 GB, got {self.storage.max_upload_size}")
+        return errors
 
     def get_expanded_paths(self) -> dict[str, Path]:
         """Return all paths expanded to absolute Path objects."""
@@ -113,6 +187,11 @@ def load_config() -> CompanionConfig:
         cfg = CompanionConfig.from_dict(data)
     else:
         cfg = DEFAULT_CONFIG
+    errors = cfg.validate()
+    if errors:
+        raise SystemExit(
+            "[FATAL] config validation errors:\n  " + "\n  ".join(errors)
+        )
     return cfg.resolve_env_overrides()
 
 

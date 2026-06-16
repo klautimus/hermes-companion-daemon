@@ -4,7 +4,7 @@
 For modern pip, pyproject.toml is used instead.
 """
 
-from setuptools import setup, find_packages
+from setuptools import setup
 
 setup(
     name="hermes-companion-server",

@@ -51,6 +51,49 @@ logger = logging.getLogger("companion")
 
 STARTED_AT = time.monotonic()
 
+# ── Setup Token Store ─────────────────────────────────────────
+# One-time setup tokens. Each entry: {"username": str, "password": str, "board": str, "expires_at": float}
+_SETUP_TOKENS: dict[str, dict] = {}
+
+
+def register_setup_token(token: str, username: str, password: str, board: str = "default", ttl_seconds: int = 300):
+    _SETUP_TOKENS[token] = {
+        "username": username,
+        "password": password,
+        "board": board,
+        "expires_at": time.monotonic() + ttl_seconds,
+    }
+
+
+def _load_setup_tokens_from_disk():
+    """Load setup tokens from a file written by the setup wizard, then delete the file."""
+    try:
+        config_path = Path(_config["auth"]["file_path"]).parent
+        token_file = config_path / "setup_token.json"
+        if not token_file.exists():
+            return
+        raw = json.loads(token_file.read_text())
+        now = time.monotonic()
+        for entry in raw.get("tokens", []):
+            try:
+                created = datetime.fromisoformat(entry["created_at"]).timestamp()
+                age = time.time() - created
+                if age > 300:
+                    continue
+                expires_at = now + (300 - age)
+                _SETUP_TOKENS[entry["token"]] = {
+                    "username": entry["username"],
+                    "password": entry["password"],
+                    "board": entry.get("board", "default"),
+                    "expires_at": expires_at,
+                }
+            except Exception as e:
+                logger.warning("Skipping malformed token entry: %s", e)
+        # After loading, delete the file (tokens are single-use and ephemeral)
+        token_file.unlink()
+    except Exception as e:
+        logger.warning("Failed to load setup_token.json: %s", e)
+
 
 # ── Auth ────────────────────────────────────────────────────
 class BasicAuth:
@@ -163,7 +206,7 @@ class BasicAuth:
 
     @web.middleware
     async def middleware(self, request, handler):
-        if request.path in ("/healthz", "/health"):
+        if request.path in ("/healthz", "/health", "/api/setup/redeem"):
             return await handler(request)
         if not await self.check(request):
             return web.json_response(
@@ -588,6 +631,40 @@ async def handle_attachment_serve(request: web.Request) -> web.Response:
     return web.Response(body=data, content_type=ct)
 
 
+# ── Setup Token Redeem ────────────────────────────────────────
+async def handle_setup_redeem(request):
+    """POST /api/setup/redeem — exchange a one-time setup token for credentials."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "JSON body required"}},
+            status=400,
+        )
+    token = body.get("token", "")
+    if not token or not isinstance(token, str):
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "token required"}},
+            status=422,
+        )
+    entry = _SETUP_TOKENS.pop(token, None)  # single-use: pop removes
+    if entry is None:
+        return web.json_response(
+            {"error": {"code": "NOT_FOUND", "message": "token invalid or already used"}},
+            status=404,
+        )
+    if time.monotonic() > entry["expires_at"]:
+        return web.json_response(
+            {"error": {"code": "EXPIRED", "message": "token expired"}},
+            status=410,
+        )
+    return web.json_response({
+        "username": entry["username"],
+        "password": entry["password"],
+        "board": entry["board"],
+    })
+
+
 # ── App Setup ────────────────────────────────────────────────
 async def create_app() -> web.Application:
     auth = BasicAuth(AUTH_FILE)
@@ -623,10 +700,14 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/attachments", handle_attachment_upload)
     app.router.add_get("/api/attachments/{att_id}", handle_attachment_serve)
 
+    # Setup token redeem
+    app.router.add_post("/api/setup/redeem", handle_setup_redeem)
+
     return app
 
 
 def main():
+    _load_setup_tokens_from_disk()
     app = create_app()
     logger.info("Companion daemon starting on %s:%d", HOST, PORT)
     web.run_app(app, host=HOST, port=PORT, print=logger.info)

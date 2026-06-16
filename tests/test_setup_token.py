@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Tests for the setup token system (Plan 003)."""
+
+import asyncio
+import base64
+import hashlib
+import hmac as _hmac
+import json
+import os
+import sys
+import tempfile
+import time
+import types
+import importlib.util
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+# Add parent dir for direct imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from setup_wizard import generate_setup_token, generate_qr_code
+from config_schema import CompanionConfig
+
+
+# ── Bootstrap: make companion importable as a package ──────────────
+_companion_dir = Path(__file__).parent.parent
+
+_companion_pkg = types.ModuleType("companion")
+_companion_pkg.__path__ = [str(_companion_dir)]
+_companion_pkg.__package__ = "companion"
+sys.modules["companion"] = _companion_pkg
+
+_stub_config = types.ModuleType("companion.config_schema")
+_stub_config.load_config = lambda: None
+_stub_config.MODULE_DIR = Path("/tmp")
+
+_stub_first_run = types.ModuleType("companion.first_run")
+_stub_first_run.ensure_configured_or_exit = lambda: None
+
+sys.modules["companion.config_schema"] = _stub_config
+sys.modules["companion.first_run"] = _stub_first_run
+
+_server_spec = importlib.util.spec_from_file_location(
+    "companion.server",
+    str(_companion_dir / "server.py"),
+    submodule_search_locations=[],
+)
+_server_mod = importlib.util.module_from_spec(_server_spec)
+sys.modules["companion.server"] = _server_mod
+_server_spec.loader.exec_module(_server_mod)
+
+
+# ── Token generation ────────────────────────────────────────────
+
+class TestGenerateSetupToken:
+    def test_returns_string(self):
+        token = generate_setup_token()
+        assert isinstance(token, str)
+
+    def test_length(self):
+        """32 bytes urlsafe -> 43 chars."""
+        token = generate_setup_token()
+        assert len(token) >= 32
+
+    def test_unique_each_time(self):
+        t1 = generate_setup_token()
+        t2 = generate_setup_token()
+        assert t1 != t2
+
+    def test_urlsafe_characters(self):
+        """Token should only contain URL-safe base64 characters."""
+        import re
+        token = generate_setup_token()
+        assert re.match(r'^[A-Za-z0-9_-]+$', token)
+
+
+# ── QR code URI format ─────────────────────────────────────────
+
+class TestGenerateQrCodeNoPassword:
+    def test_no_plaintext_password_in_uri(self):
+        """Regression: QR code URI must NOT contain 'pass=' with plaintext password."""
+        config = CompanionConfig()
+        token = generate_setup_token()
+        qr_uri = generate_qr_code(config, "admin", token)
+        assert "pass=" not in qr_uri
+
+    def test_token_in_uri(self):
+        config = CompanionConfig()
+        token = generate_setup_token()
+        qr_uri = generate_qr_code(config, "admin", token)
+        assert "token=" in qr_uri
+        assert token in qr_uri
+
+    def test_uri_format(self):
+        config = CompanionConfig()
+        token = generate_setup_token()
+        qr_uri = generate_qr_code(config, "admin", token)
+        assert qr_uri.startswith("hermescompanion://configure?")
+        assert "url=" in qr_uri
+        assert "user=admin" in qr_uri
+        assert "board=default" in qr_uri
+
+    def test_custom_board(self):
+        config = CompanionConfig()
+        token = generate_setup_token()
+        qr_uri = generate_qr_code(config, "admin", token)
+        # Default board is "default"
+        assert "board=default" in qr_uri
+
+
+# ── Setup token redeem endpoint ────────────────────────────────
+
+class TestSetupTokenRedeem:
+    """Test the /api/setup/redeem endpoint logic in server.py."""
+
+    def setup_method(self):
+        _server_mod._SETUP_TOKENS.clear()
+
+    def teardown_method(self):
+        _server_mod._SETUP_TOKENS.clear()
+
+    def _register_token(self, token="test-token-123", username="admin", password="secretpw"):
+        _server_mod._SETUP_TOKENS[token] = {
+            "username": username,
+            "password": password,
+            "board": "default",
+            "expires_at": time.monotonic() + 300,
+        }
+
+    def test_redeem_returns_credentials(self):
+        self._register_token()
+        token = "test-token-123"
+        entry = _server_mod._SETUP_TOKENS.pop(token, None)
+        assert entry is not None
+        assert entry["username"] == "admin"
+        assert entry["password"] == "secretpw"
+        assert entry["board"] == "default"
+
+    def test_redeem_single_use(self):
+        self._register_token()
+        token = "test-token-123"
+        # First redeem succeeds
+        entry = _server_mod._SETUP_TOKENS.pop(token, None)
+        assert entry is not None
+        # Second redeem fails (already consumed)
+        entry2 = _server_mod._SETUP_TOKENS.pop(token, None)
+        assert entry2 is None
+
+    def test_redeem_expired_token(self):
+        _server_mod._SETUP_TOKENS["expired-token"] = {
+            "username": "admin",
+            "password": "pw",
+            "board": "default",
+            "expires_at": time.monotonic() - 1,  # already expired
+        }
+        entry = _server_mod._SETUP_TOKENS.pop("expired-token", None)
+        assert entry is not None
+        assert time.monotonic() > entry["expires_at"]
+
+    def test_redeem_invalid_token(self):
+        entry = _server_mod._SETUP_TOKENS.pop("nonexistent", None)
+        assert entry is None
+
+
+# ── Token file loading ─────────────────────────────────────────
+
+class TestTokenFileLoading:
+    def setup_method(self):
+        _server_mod._SETUP_TOKENS.clear()
+
+    def teardown_method(self):
+        _server_mod._SETUP_TOKENS.clear()
+
+    def test_load_setup_tokens_from_disk(self, tmp_path):
+        """_load_setup_tokens_from_disk reads and deletes the token file."""
+        from datetime import datetime, timezone
+
+        token_file = tmp_path / "setup_token.json"
+        created = datetime.now(timezone.utc).isoformat()
+        token_file.write_text(json.dumps({
+            "tokens": [{
+                "token": "disk-token-abc",
+                "username": "admin",
+                "password": "diskpw",
+                "board": "default",
+                "created_at": created,
+            }],
+        }))
+
+        # Patch _config on the server module to point at our tmp_path
+        _server_mod._config = {"auth": {"file_path": str(tmp_path / "auth.json")}}
+        _server_mod._load_setup_tokens_from_disk()
+
+        # Token should be loaded
+        assert "disk-token-abc" in _server_mod._SETUP_TOKENS
+        entry = _server_mod._SETUP_TOKENS["disk-token-abc"]
+        assert entry["username"] == "admin"
+        assert entry["password"] == "diskpw"
+
+        # File should be deleted after loading
+        assert not token_file.exists()
+
+    def test_load_skips_expired_tokens(self, tmp_path):
+        """Tokens older than 5 minutes are skipped."""
+        from datetime import datetime, timezone, timedelta
+
+        token_file = tmp_path / "setup_token.json"
+        old_time = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        token_file.write_text(json.dumps({
+            "tokens": [{
+                "token": "old-token",
+                "username": "admin",
+                "password": "pw",
+                "board": "default",
+                "created_at": old_time,
+            }],
+        }))
+
+        _server_mod._config = {"auth": {"file_path": str(tmp_path / "auth.json")}}
+        _server_mod._load_setup_tokens_from_disk()
+
+        assert "old-token" not in _server_mod._SETUP_TOKENS
+        # File still deleted even if all tokens expired
+        assert not token_file.exists()

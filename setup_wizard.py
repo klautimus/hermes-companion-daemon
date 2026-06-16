@@ -109,6 +109,15 @@ def generate_password() -> str:
     return secrets.token_urlsafe(32)
 
 
+def generate_setup_token() -> str:
+    """Generate a single-use, 5-minute-TTL setup token.
+
+    Returned in the QR code URI instead of the plaintext password. The mobile
+    app redeems it via POST /api/setup/redeem to fetch the actual credentials.
+    """
+    return secrets.token_urlsafe(32)
+
+
 def hash_password(password: str) -> str:
     """Hash password with scrypt (same format as server.py)."""
     import base64
@@ -151,9 +160,12 @@ def create_attachments_dir(config: CompanionConfig) -> Path:
     return attachments_dir
 
 
-def generate_qr_code(config: CompanionConfig, username: str, password: str) -> str:
-    """Generate QR code data URI for mobile app config."""
-    # hermescompanion://configure?url=...&user=...&pass=...&board=...
+def generate_qr_code(config: CompanionConfig, username: str, token: str) -> str:
+    """Generate QR code data URI for mobile app config.
+
+    Uses a one-time setup token instead of plaintext password. The mobile
+    app redeems the token via POST /api/setup/redeem to fetch credentials.
+    """
     server_url = f"http://{config.server.host}:{config.server.port}"
     board = "default"
 
@@ -161,7 +173,7 @@ def generate_qr_code(config: CompanionConfig, username: str, password: str) -> s
     params = {
         "url": server_url,
         "user": username,
-        "pass": password,
+        "token": token,
         "board": board,
     }
     query = urllib.parse.urlencode(params)
@@ -221,11 +233,32 @@ def print_connection_info(config: CompanionConfig, username: str, password: str)
     print("=" * 60)
     print(f"\nServer URL:  {server_url}")
     print(f"Username:    {username}")
-    print(f"Password:    {password}")
+    print("Password:    (transferred via secure QR token — check your mobile app)")
     print(f"Board:       default")
     print("\nOpen the Hermes Companion app on your Android device")
     print("and enter these credentials.")
     print("=" * 60)
+
+
+def register_setup_token_wizard(token: str, username: str, password: str, config: CompanionConfig):
+    """Write the setup token to a file the daemon will read on startup."""
+    import json
+    from datetime import datetime, timezone
+
+    paths = config.get_expanded_paths()
+    config_dir = paths["config_dir"]
+    config_dir.mkdir(parents=True, exist_ok=True)
+    token_file = config_dir / "setup_token.json"
+    token_file.write_text(json.dumps({
+        "tokens": [{
+            "token": token,
+            "username": username,
+            "password": password,
+            "board": "default",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }],
+    }, indent=2))
+    token_file.chmod(0o600)
 
 
 def run_setup_wizard() -> int:
@@ -311,9 +344,11 @@ def run_setup_wizard() -> int:
     attachments_dir = create_attachments_dir(config)
     print(f"   Directory: {attachments_dir}")
 
-    # 9. Generate QR code
+    # 9. Generate QR code with one-time setup token
     print("\n📱 Generating QR code for mobile app...")
-    qr_data = generate_qr_code(config, username, password)
+    token = generate_setup_token()
+    register_setup_token_wizard(token, username, password, config)
+    qr_data = generate_qr_code(config, username, token)
     qr_ascii = render_qr_ascii(qr_data)
     print("\nScan with Hermes Companion app:")
     print(qr_ascii)

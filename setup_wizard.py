@@ -319,7 +319,7 @@ def run_setup_wizard() -> int:
 
     # Generate random password
     password = generate_password()
-    print(f"   Generated secure password: {password}")
+    print("   Password generated (transferred via QR token)")
 
     # 5. Build config
     config = CompanionConfig()

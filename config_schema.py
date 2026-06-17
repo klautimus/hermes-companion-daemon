@@ -48,7 +48,7 @@ class HermesConfig:
 
 @dataclass
 class AuthConfig:
-    file: str = "~/.config/hermes-companion/auth.json"
+    file: str = "~/.hermes/companion/auth.json"
 
 
 @dataclass

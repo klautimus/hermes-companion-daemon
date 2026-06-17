@@ -21,3 +21,4 @@ attachments/
 *.log
 .venv-audit/
 *.egg-info/
+setup_token.json

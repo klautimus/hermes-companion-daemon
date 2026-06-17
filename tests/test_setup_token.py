@@ -275,20 +275,23 @@ class TestConcurrentRedeem:
         app = await _server_mod.create_app()
         async with TestClient(TestServer(app)) as client:
             async def redeem():
-                return await client.post(
+                resp = await client.post(
                     "/api/setup/redeem",
                     json={"token": "concurrent-token"},
                     auth=aiohttp.BasicAuth("admin", password),
                 )
+                # Read JSON while the client session is still open
+                data = await resp.json() if resp.status == 200 else None
+                return resp.status, data
 
-            r1, r2 = await asyncio.gather(redeem(), redeem())
+            (s1, d1), (s2, d2) = await asyncio.gather(redeem(), redeem())
 
-        statuses = sorted([r1.status, r2.status])
+        statuses = sorted([s1, s2])
         assert statuses == [200, 404], f"Expected [200, 404], got {statuses}"
 
         # The 200 response should contain credentials
-        ok_resp = r1 if r1.status == 200 else r2
-        data = await ok_resp.json()
-        assert data["username"] == "alice"
-        assert data["password"] == "secret"
-        assert data["board"] == "default"
+        ok_data = d1 if s1 == 200 else d2
+        assert ok_data is not None
+        assert ok_data["username"] == "alice"
+        assert ok_data["password"] == "secret"
+        assert ok_data["board"] == "default"

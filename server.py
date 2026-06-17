@@ -34,6 +34,18 @@ from first_run import ensure_configured_or_exit
 ensure_configured_or_exit()
 config = load_config()
 
+# Fail fast if api_key is a placeholder
+PLACEHOLDER_KEYS = {"test-key", "changeme", "your-key-here", "TODO", "REPLACE_ME", ""}
+if config.hermes.api_key in PLACEHOLDER_KEYS:
+    print(
+        f"FATAL: hermes.api_key in config.yaml looks like a placeholder "
+        f"('{config.hermes.api_key}'). Set it to the real API_SERVER_KEY "
+        f"from ~/.hermes/.env, or unset the config field to auto-load from "
+        f"the env var.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
 HOST = config.server.host
 PORT = config.server.port
 HERMES_API = config.hermes.api_url

@@ -64,7 +64,7 @@ async def register_setup_token(token: str, username: str, password: str, board: 
             "username": username,
             "password": password,
             "board": board,
-            "expires_at": time.monotonic() + ttl_seconds,
+            "expires_at": time.time() + ttl_seconds,
         }
 
 
@@ -82,14 +82,14 @@ def _load_setup_tokens_from_disk():
         if not token_file.exists():
             return
         raw = json.loads(token_file.read_text())
-        now = time.monotonic()
+        now = time.time()
         for entry in raw.get("tokens", []):
             try:
                 created = datetime.fromisoformat(entry["created_at"]).timestamp()
-                age = time.time() - created
+                age = now - created
                 if age > 300:
                     continue
-                expires_at = now + (300 - age)
+                expires_at = created + 300
                 _SETUP_TOKENS[entry["token"]] = {
                     "username": entry["username"],
                     "password": entry["password"],
@@ -703,7 +703,7 @@ async def handle_setup_redeem(request):
             {"error": {"code": "NOT_FOUND", "message": "token invalid or already used"}},
             status=404,
         )
-    if time.monotonic() > entry["expires_at"]:
+    if time.time() > entry["expires_at"]:
         return web.json_response(
             {"error": {"code": "EXPIRED", "message": "token expired"}},
             status=410,

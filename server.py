@@ -83,7 +83,8 @@ def _load_setup_tokens_from_disk():
     is listening, a lock would be needed.
     """
     try:
-        config_path = Path(_config["auth"]["file_path"]).parent
+        paths = config.get_expanded_paths()
+        config_path = paths["config_dir"]
         token_file = config_path / "setup_token.json"
         if not token_file.exists():
             return

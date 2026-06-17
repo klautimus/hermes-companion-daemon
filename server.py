@@ -58,6 +58,11 @@ STARTED_AT = time.monotonic()
 _SETUP_TOKENS: dict[str, dict] = {}
 _setup_tokens_lock: asyncio.Lock = asyncio.Lock()
 
+# ── Setup Token Redeem Rate Limiting ──────────────────────────
+_SETUP_REDEEM_FAILURES: dict[str, tuple[int, float]] = {}  # ip -> (count, locked_until)
+_SETUP_REDEEM_LOCKOUT_THRESHOLD = 10
+_SETUP_REDEEM_LOCKOUT_DURATION = 60  # seconds
+
 
 async def register_setup_token(token: str, username: str, password: str, board: str = "default", ttl_seconds: int = 300):
     async with _setup_tokens_lock:
@@ -111,10 +116,14 @@ class BasicAuth:
         self._file = auth_file
         self._users: dict = {}
         self._mtime: float = 0.0
-        # Brute-force tracking: key = (username, client_ip) -> (fail_count, locked_until_monotonic)
+        # Brute-force tracking: key = (username, client_ip) -> (fail_count, locked_until)
         self._failures: dict = {}
         self._max_failures: int = 5
         self._lockout_seconds: int = 60
+        # Per-username lockout (defense in depth: IP rotation bypasses per-IP tracking)
+        self._user_failures: dict = {}  # username -> (fail_count, locked_until)
+        self._user_lockout_threshold: int = 5
+        self._user_lockout_seconds: int = 300  # 5 min
         self._reload()
 
     def _reload(self):
@@ -132,11 +141,21 @@ class BasicAuth:
         count, until = self._failures.get(key, (0, 0.0))
         count += 1
         if count >= self._max_failures:
-            until = time.monotonic() + self._lockout_seconds
+            until = time.time() + self._lockout_seconds
         self._failures[key] = (count, until)
 
     def _clear_failures(self, key):
         self._failures.pop(key, None)
+
+    def _record_user_failure(self, username: str):
+        count, until = self._user_failures.get(username, (0, 0.0))
+        count += 1
+        if count >= self._user_lockout_threshold:
+            until = time.time() + self._user_lockout_seconds
+        self._user_failures[username] = (count, until)
+
+    def _clear_user_failures(self, username: str):
+        self._user_failures.pop(username, None)
 
     async def check(self, request: web.Request) -> bool:
         self._reload()
@@ -153,7 +172,12 @@ class BasicAuth:
         # Lockout check (per username + IP)
         key = (username, client_ip)
         fail = self._failures.get(key)
-        if fail and time.monotonic() < fail[1]:
+        if fail and time.time() < fail[1]:
+            return False
+
+        # Per-username lockout check (defense in depth against IP rotation)
+        user_fail = self._user_failures.get(username)
+        if user_fail and time.time() < user_fail[1]:
             return False
 
         user = self._users.get(username)
@@ -166,6 +190,7 @@ class BasicAuth:
             except Exception:
                 pass
             self._record_failure(key)
+            self._record_user_failure(username)
             return False
 
         phash = user.get("password_hash", "")
@@ -173,8 +198,10 @@ class BasicAuth:
             # Plaintext fallback — constant-time compare
             if hmac.compare_digest(phash, password):
                 self._clear_failures(key)
+                self._clear_user_failures(username)
                 return True
             self._record_failure(key)
+            self._record_user_failure(username)
             return False
 
         try:
@@ -187,14 +214,17 @@ class BasicAuth:
             computed = base64.b64encode(hash_bytes).decode()
             if hmac.compare_digest(computed, expected):
                 self._clear_failures(key)
+                self._clear_user_failures(username)
                 # Transparent hash upgrade: if N < 131072, re-hash with stronger params
                 if n < 131072:
                     await self._upgrade_hash(username, password)
                 return True
             self._record_failure(key)
+            self._record_user_failure(username)
             return False
         except Exception:
             self._record_failure(key)
+            self._record_user_failure(username)
             return False
 
     async def _upgrade_hash(self, username: str, password: str):
@@ -687,6 +717,17 @@ async def handle_attachment_serve(request: web.Request) -> web.StreamResponse:
 # ── Setup Token Redeem ────────────────────────────────────────
 async def handle_setup_redeem(request):
     """POST /api/setup/redeem — exchange a one-time setup token for credentials."""
+    client_ip = request.remote or "unknown"
+
+    # Check rate limit before doing any work
+    async with _setup_tokens_lock:
+        fail_count, locked_until = _SETUP_REDEEM_FAILURES.get(client_ip, (0, 0.0))
+        if locked_until > time.time():
+            return web.json_response(
+                {"error": "Too many attempts", "retry_after": int(locked_until - time.time())},
+                status=429,
+            )
+
     try:
         body = await request.json()
     except Exception:
@@ -709,15 +750,36 @@ async def handle_setup_redeem(request):
         entry = _SETUP_TOKENS.pop(token, None)
 
     if entry is None:
+        # Rate-limit tracking: increment failure counter
+        async with _setup_tokens_lock:
+            count, _ = _SETUP_REDEEM_FAILURES.get(client_ip, (0, 0.0))
+            count += 1
+            if count >= _SETUP_REDEEM_LOCKOUT_THRESHOLD:
+                _SETUP_REDEEM_FAILURES[client_ip] = (count, time.time() + _SETUP_REDEEM_LOCKOUT_DURATION)
+            else:
+                _SETUP_REDEEM_FAILURES[client_ip] = (count, 0.0)
         return web.json_response(
             {"error": {"code": "NOT_FOUND", "message": "token invalid or already used"}},
             status=404,
         )
     if time.time() > entry["expires_at"]:
+        # Rate-limit tracking: increment failure counter (expired = failed attempt)
+        async with _setup_tokens_lock:
+            count, _ = _SETUP_REDEEM_FAILURES.get(client_ip, (0, 0.0))
+            count += 1
+            if count >= _SETUP_REDEEM_LOCKOUT_THRESHOLD:
+                _SETUP_REDEEM_FAILURES[client_ip] = (count, time.time() + _SETUP_REDEEM_LOCKOUT_DURATION)
+            else:
+                _SETUP_REDEEM_FAILURES[client_ip] = (count, 0.0)
         return web.json_response(
             {"error": {"code": "EXPIRED", "message": "token expired"}},
             status=410,
         )
+
+    # Success: reset rate-limit counter
+    async with _setup_tokens_lock:
+        _SETUP_REDEEM_FAILURES[client_ip] = (0, 0.0)
+
     return web.json_response({
         "username": entry["username"],
         "password": entry["password"],

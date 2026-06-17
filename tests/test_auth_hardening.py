@@ -130,15 +130,30 @@ class TestLockoutAfterNFailures:
         assert result is False, "should be locked out after 5 failures"
 
     @pytest.mark.asyncio
-    async def test_lockout_per_user_ip(self, basic_auth):
-        """Lockout on one IP doesn't affect another IP."""
+    async def test_lockout_per_user_ip(self, auth_file):
+        """Per-IP lockout is isolated: lockout on one IP doesn't affect another IP
+        for a different username. (Per-username lockout is tested separately.)"""
+        phash = _scrypt_hash("testpass123", n=16384)
+        auth_data = {
+            "users": {
+                "admin": {"password_hash": phash, "created_at": "2026-01-01"},
+            }
+        }
+        auth_file.write_text(json.dumps(auth_data))
+        ba = BasicAuth(auth_file)
+
+        # Lock out from IP 1 using wrong password
         req_ip1 = _make_request(_basic_auth("admin", "wrong"), remote="10.0.0.1")
         for _ in range(5):
-            await basic_auth.check(req_ip1)
+            await ba.check(req_ip1)
 
+        # Same username from different IP: per-IP lockout is isolated,
+        # but per-username lockout will also trigger (defense in depth).
+        # Verify per-username lockout is working:
         req_ip2 = _make_request(_basic_auth("admin", "testpass123"), remote="10.0.0.2")
-        result = await basic_auth.check(req_ip2)
-        assert result is True, "different IP should not be locked out"
+        result = await ba.check(req_ip2)
+        # With per-username lockout, this should be False (locked out)
+        assert result is False, "per-username lockout should trigger after 5 failures across IPs"
 
     @pytest.mark.asyncio
     async def test_success_clears_failures(self, basic_auth):
@@ -174,6 +189,7 @@ class TestLockoutClearsAfterTimeout:
         auth_file.write_text(json.dumps(auth_data))
         ba = BasicAuth(auth_file)
         ba._lockout_seconds = 0.1
+        ba._user_lockout_seconds = 0.1
 
         req_wrong = _make_request(_basic_auth("admin", "wrong"), remote="10.0.0.1")
         for _ in range(5):
@@ -366,3 +382,99 @@ class TestBasicAuthFunctionality:
     async def test_malformed_auth_header_returns_false(self, basic_auth):
         req = _make_request("Basic not-valid-base64!!!", remote="10.0.0.1")
         assert await basic_auth.check(req) is False
+
+
+# ─── Per-username lockout tests ───────────────────────────────────
+
+class TestPerUsernameLockout:
+    """Per-username lockout triggers after 5 failed attempts, regardless of IP."""
+
+    @pytest.mark.asyncio
+    async def test_user_lockout_after_5_failures_different_ips(self, basic_auth):
+        """5 failed attempts from different IPs should lock the username."""
+        for i in range(5):
+            req = _make_request(_basic_auth("admin", "wrong"), remote=f"10.0.0.{i}")
+            result = await basic_auth.check(req)
+            assert result is False, f"attempt {i+1} should fail"
+
+        # 6th attempt from new IP with correct password should still fail (user locked)
+        req_correct = _make_request(_basic_auth("admin", "testpass123"), remote="10.0.0.99")
+        result = await basic_auth.check(req_correct)
+        assert result is False, "should be locked out after 5 failures across IPs"
+
+    @pytest.mark.asyncio
+    async def test_user_lockout_does_not_affect_other_users(self, auth_file):
+        """Locking out one user should not affect another user."""
+        phash1 = _scrypt_hash("pass1", n=16384)
+        phash2 = _scrypt_hash("pass2", n=16384)
+        auth_data = {
+            "users": {
+                "alice": {"password_hash": phash1, "created_at": "2026-01-01"},
+                "bob": {"password_hash": phash2, "created_at": "2026-01-01"},
+            }
+        }
+        auth_file.write_text(json.dumps(auth_data))
+        ba = BasicAuth(auth_file)
+
+        # Lock out alice
+        for i in range(5):
+            req = _make_request(_basic_auth("alice", "wrong"), remote=f"10.0.0.{i}")
+            await ba.check(req)
+
+        # Alice should be locked
+        req_alice = _make_request(_basic_auth("alice", "pass1"), remote="10.0.0.99")
+        assert await ba.check(req_alice) is False
+
+        # Bob should still be able to authenticate
+        req_bob = _make_request(_basic_auth("bob", "pass2"), remote="10.0.0.99")
+        assert await ba.check(req_bob) is True
+
+    @pytest.mark.asyncio
+    async def test_user_lockout_clears_after_timeout(self, auth_file):
+        """After per-username lockout expires, correct password works again."""
+        phash = _scrypt_hash("testpass123", n=16384)
+        auth_data = {
+            "users": {
+                "admin": {"password_hash": phash, "created_at": "2026-01-01"},
+            }
+        }
+        auth_file.write_text(json.dumps(auth_data))
+        ba = BasicAuth(auth_file)
+        ba._user_lockout_seconds = 0.1
+
+        # Trigger user lockout
+        for i in range(5):
+            req = _make_request(_basic_auth("admin", "wrong"), remote=f"10.0.0.{i}")
+            await ba.check(req)
+
+        # Should be locked
+        req = _make_request(_basic_auth("admin", "testpass123"), remote="10.0.0.99")
+        assert await ba.check(req) is False
+
+        # Wait for lockout to expire
+        time.sleep(0.2)
+
+        # Should work again
+        result = await ba.check(req)
+        assert result is True, "user lockout should have expired"
+
+    @pytest.mark.asyncio
+    async def test_successful_auth_cres_user_failures(self, basic_auth):
+        """Successful auth resets the per-username failure counter."""
+        # 3 failures
+        for i in range(3):
+            req = _make_request(_basic_auth("admin", "wrong"), remote=f"10.0.0.{i}")
+            await basic_auth.check(req)
+
+        # Successful auth
+        req_ok = _make_request(_basic_auth("admin", "testpass123"), remote="10.0.0.10")
+        assert await basic_auth.check(req_ok) is True
+
+        # 4 more failures should NOT lock out (counter was reset)
+        for i in range(4):
+            req = _make_request(_basic_auth("admin", "wrong"), remote=f"10.0.0.{i+20}")
+            await basic_auth.check(req)
+
+        # Should still work
+        req_ok2 = _make_request(_basic_auth("admin", "testpass123"), remote="10.0.0.30")
+        assert await basic_auth.check(req_ok2) is True, "counter was reset, should not be locked out yet"

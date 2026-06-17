@@ -295,3 +295,165 @@ class TestConcurrentRedeem:
         assert ok_data["username"] == "alice"
         assert ok_data["password"] == "secret"
         assert ok_data["board"] == "default"
+
+
+# ─── Setup redeem rate limiting tests ─────────────────────────────
+
+class TestSetupRedeemRateLimit:
+    """Per-IP rate limiting on /api/setup/redeem: 10 failures -> 429."""
+
+    @pytest.mark.asyncio
+    async def test_redeem_rate_limit_after_10_failures(self, tmp_path):
+        """After 10 failed redeems from same IP, the 11th gets 429."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        # Create a minimal auth file
+        auth_file = tmp_path / "auth.json"
+        import hashlib, base64, hmac as _hmac
+        import os
+        password = "testpw"
+        salt = base64.b64encode(os.urandom(16)).decode()
+        pw_hash = base64.b64encode(
+            _hmac.new(salt.encode(), password.encode(), hashlib.sha256).digest()
+        ).decode()
+        auth_file.write_text(json.dumps({
+            "users": {
+                "admin": {"password_hash": pw_hash, "salt": salt, "role": "admin"}
+            }
+        }))
+
+        # Patch config so create_app() works
+        _server_mod._config = {"auth": {"file_path": str(auth_file)}}
+        _server_mod.AUTH_FILE = auth_file
+
+        # Clear rate limit state
+        _server_mod._SETUP_REDEEM_FAILURES.clear()
+
+        # Create the app and test client
+        app = await _server_mod.create_app()
+        async with TestClient(TestServer(app)) as client:
+            # 10 failed attempts with bad tokens
+            for i in range(10):
+                resp = await client.post(
+                    "/api/setup/redeem",
+                    json={"token": f"bad-token-{i}"},
+                    auth=aiohttp.BasicAuth("admin", password),
+                )
+                assert resp.status in (404, 410), f"attempt {i+1}: expected 404/410, got {resp.status}"
+
+            # 11th attempt should be rate-limited (429)
+            resp = await client.post(
+                "/api/setup/redeem",
+                json={"token": "bad-token-11"},
+                auth=aiohttp.BasicAuth("admin", password),
+            )
+            assert resp.status == 429, f"expected 429, got {resp.status}"
+            data = await resp.json()
+            assert "retry_after" in data
+            assert data["retry_after"] > 0
+
+    @pytest.mark.asyncio
+    async def test_redeem_rate_limit_per_ip_isolation(self, tmp_path):
+        """Rate limit on one IP should not affect another IP."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        auth_file = tmp_path / "auth.json"
+        import hashlib, base64, hmac as _hmac
+        import os
+        password = "testpw"
+        salt = base64.b64encode(os.urandom(16)).decode()
+        pw_hash = base64.b64encode(
+            _hmac.new(salt.encode(), password.encode(), hashlib.sha256).digest()
+        ).decode()
+        auth_file.write_text(json.dumps({
+            "users": {
+                "admin": {"password_hash": pw_hash, "salt": salt, "role": "admin"}
+            }
+        }))
+
+        _server_mod._config = {"auth": {"file_path": str(auth_file)}}
+        _server_mod.AUTH_FILE = auth_file
+        _server_mod._SETUP_REDEEM_FAILURES.clear()
+
+        app = await _server_mod.create_app()
+        async with TestClient(TestServer(app)) as client:
+            # 10 failed attempts from IP 10.0.0.1
+            for i in range(10):
+                resp = await client.post(
+                    "/api/setup/redeem",
+                    json={"token": f"bad-{i}"},
+                    auth=aiohttp.BasicAuth("admin", password),
+                )
+                assert resp.status in (404, 410)
+
+            # 11th from same IP should be 429
+            resp = await client.post(
+                "/api/setup/redeem",
+                json={"token": "bad-11"},
+                auth=aiohttp.BasicAuth("admin", password),
+            )
+            assert resp.status == 429
+
+    @pytest.mark.asyncio
+    async def test_redeem_success_resets_rate_limit(self, tmp_path):
+        """A successful redeem should reset the rate limit counter."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        auth_file = tmp_path / "auth.json"
+        import hashlib, base64, hmac as _hmac
+        import os
+        password = "testpw"
+        salt = base64.b64encode(os.urandom(16)).decode()
+        pw_hash = base64.b64encode(
+            _hmac.new(salt.encode(), password.encode(), hashlib.sha256).digest()
+        ).decode()
+        auth_file.write_text(json.dumps({
+            "users": {
+                "admin": {"password_hash": pw_hash, "salt": salt, "role": "admin"}
+            }
+        }))
+
+        _server_mod._config = {"auth": {"file_path": str(auth_file)}}
+        _server_mod.AUTH_FILE = auth_file
+        _server_mod._SETUP_REDEEM_FAILURES.clear()
+
+        # Register a valid token
+        await _server_mod.register_setup_token(
+            "valid-token", "newuser", "newpass", "default", 300
+        )
+
+        app = await _server_mod.create_app()
+        async with TestClient(TestServer(app)) as client:
+            # 9 failed attempts
+            for i in range(9):
+                resp = await client.post(
+                    "/api/setup/redeem",
+                    json={"token": f"bad-{i}"},
+                    auth=aiohttp.BasicAuth("admin", password),
+                )
+                assert resp.status in (404, 410)
+
+            # Successful redeem should reset counter
+            resp = await client.post(
+                "/api/setup/redeem",
+                json={"token": "valid-token"},
+                auth=aiohttp.BasicAuth("admin", password),
+            )
+            assert resp.status == 200, f"expected 200, got {resp.status}"
+
+            # Counter reset: 10 more failures should NOT trigger 429
+            for i in range(10):
+                resp = await client.post(
+                    "/api/setup/redeem",
+                    json={"token": f"bad-after-{i}"},
+                    auth=aiohttp.BasicAuth("admin", password),
+                )
+                assert resp.status in (404, 410), f"attempt {i+1}: expected 404/410, got {resp.status}"
+
+            # 11th should now be 429 (new counter reached 10)
+            resp = await client.post(
+                "/api/setup/redeem",
+                json={"token": "bad-after-11"},
+                auth=aiohttp.BasicAuth("admin", password),
+            )
+            assert resp.status == 429, f"expected 429, got {resp.status}"

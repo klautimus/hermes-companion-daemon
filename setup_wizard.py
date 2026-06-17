@@ -37,7 +37,7 @@ except ImportError:
 
 
 # ── Constants ──────────────────────────────────────────────────
-SCRYPT_N = 131072
+SCRYPT_N = 16384  # was 131072; matches daemon's working value
 SCRYPT_R = 8
 SCRYPT_P = 1
 SCRYPT_DKLEN = 32

@@ -193,9 +193,14 @@ class BasicAuth:
         if user_fail and time.time() < user_fail[1]:
             return False
 
+        # Note: scrypt N=16384 is used throughout for compatibility. The setup
+        # wizard, daemon, and test fixtures all use the same N value. Upgrading
+        # to N=131072 (OWASP 2023 minimum) would require ~128MB of memory per
+        # verify call, which exceeds the system limit on this build.
         user = self._users.get(username)
         if not user:
-            # Equalize timing: dummy scrypt so timing doesn't reveal username existence
+            # Equalize timing: dummy scrypt so timing doesn't reveal username existence.
+            # Uses N=16384 to match the system's memory constraint (see comment above).
             try:
                 hashlib.scrypt(
                     password.encode(), salt=b"\x00" * 16, n=16384, r=8, p=1, dklen=32,
@@ -228,9 +233,6 @@ class BasicAuth:
             if hmac.compare_digest(computed, expected):
                 self._clear_failures(key)
                 self._clear_user_failures(username)
-                # Transparent hash upgrade: if N < 131072, re-hash with stronger params
-                if n < 131072:
-                    await self._upgrade_hash(username, password)
                 return True
             self._record_failure(key)
             self._record_user_failure(username)
@@ -239,23 +241,6 @@ class BasicAuth:
             self._record_failure(key)
             self._record_user_failure(username)
             return False
-
-    async def _upgrade_hash(self, username: str, password: str):
-        """Re-hash password with N=131072 and update auth.json."""
-        import os as _os
-        try:
-            new_salt = _os.urandom(16)
-            new_hash = hashlib.scrypt(
-                password.encode(), salt=new_salt, n=131072, r=8, p=1, dklen=32,
-            )
-            new_phash = f"scrypt$131072$8$1${new_salt.hex()}${base64.b64encode(new_hash).decode()}"
-            raw = json.loads(self._file.read_text())
-            raw["users"][username]["password_hash"] = new_phash
-            self._file.write_text(json.dumps(raw, indent=2))
-            self._mtime = 0  # force reload on next check
-            logger.info("Upgraded hash for user %s to N=131072", username)
-        except Exception as e:
-            logger.warning("Failed to upgrade hash for %s: %s", username, e)
 
     @web.middleware
     async def middleware(self, request, handler):

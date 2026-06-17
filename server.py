@@ -9,6 +9,7 @@ Provides:
 """
 
 import asyncio
+import atexit
 import base64
 import hashlib
 import hmac
@@ -289,6 +290,18 @@ class HermesProxy:
                 {"error": {"code": "HERMES_DOWN", "message": "Hermes API unreachable"}},
                 status=503,
             )
+
+
+@atexit.register
+def _close_hermes_proxy_session():
+    """Close the HermesProxy session on daemon shutdown."""
+    if HermesProxy._session is not None and not HermesProxy._session.closed:
+        try:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(HermesProxy._session.close())
+            loop.close()
+        except Exception as e:
+            logger.warning("Failed to close HermesProxy session: %s", e)
 
 
 # ── Kanban CLI Wrapper ───────────────────────────────────────
@@ -644,7 +657,7 @@ async def handle_attachment_upload(request: web.Request) -> web.Response:
     }, status=201)
 
 
-async def handle_attachment_serve(request: web.Request) -> web.Response:
+async def handle_attachment_serve(request: web.Request) -> web.StreamResponse:
     """GET /api/attachments/{id} — serve an uploaded file."""
     att_id = request.match_info["att_id"]
     # F-01 FIX: Validate att_id format — only hex chars, no path traversal
@@ -667,11 +680,8 @@ async def handle_attachment_serve(request: web.Request) -> web.Response:
             {"error": {"code": "FORBIDDEN", "message": "invalid path"}},
             status=403,
         )
-    # Guess content type
-    ct, _ = mimetypes.guess_type(file_path.name)
-    ct = ct or "application/octet-stream"
-    data = file_path.read_bytes()
-    return web.Response(body=data, content_type=ct)
+    # Stream the file instead of loading it all into memory
+    return web.FileResponse(file_path)
 
 
 # ── Setup Token Redeem ────────────────────────────────────────
@@ -752,6 +762,12 @@ async def create_app() -> web.Application:
 
     # Setup token redeem
     app.router.add_post("/api/setup/redeem", handle_setup_redeem)
+
+    async def _cleanup_session(app):
+        if HermesProxy._session is not None and not HermesProxy._session.closed:
+            await HermesProxy._session.close()
+
+    app.on_cleanup.append(_cleanup_session)
 
     return app
 

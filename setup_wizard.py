@@ -263,6 +263,18 @@ def register_setup_token_wizard(token: str, username: str, password: str, config
 
 def run_setup_wizard() -> int:
     """Run the interactive setup wizard. Returns exit code."""
+    try:
+        return _run_setup_wizard()
+    except KeyboardInterrupt:
+        print("\nSetup cancelled.")
+        return 130
+    except EOFError:
+        print("\nEOF received, aborting.")
+        return 1
+
+
+def _run_setup_wizard() -> int:
+    """Internal implementation of the setup wizard."""
     print("\n" + "=" * 60)
     print("Hermes Companion — First-Run Setup Wizard")
     print("=" * 60)

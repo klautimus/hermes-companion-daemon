@@ -102,3 +102,36 @@ async def test_streaming_saves_small_file():
         body = await resp.json()
         assert body["filename"] == "hello.txt"
         assert body["size"] == len(payload)
+
+
+@pytest.mark.asyncio
+async def test_attachment_serve_streams(tmp_path, monkeypatch):
+    """Verify handle_attachment_serve returns a FileResponse (streaming), not read_bytes."""
+    import aiohttp.test_utils
+    import aiohttp.web
+
+    # Re-import server module with ATTACHMENTS_DIR monkeypatched to tmp_path
+    monkeypatch.setattr(_server_mod, "ATTACHMENTS_DIR", tmp_path)
+    # Also set the auth file path to avoid errors
+    monkeypatch.setattr(_server_mod, "AUTH_FILE", tmp_path / "auth.json")
+
+    handle_attachment_serve = _server_mod.handle_attachment_serve
+
+    # Create a test file in the temp attachments dir
+    test_content = b"x" * (5 * 1024 * 1024)  # 5 MB
+    att_id = "att_" + "a" * 32
+    test_file = tmp_path / f"{att_id}_test.bin"
+    test_file.write_bytes(test_content)
+
+    app = aiohttp.web.Application()
+    app.router.add_get("/api/attachments/{att_id}", handle_attachment_serve)
+
+    async with aiohttp.test_utils.TestClient(
+        aiohttp.test_utils.TestServer(app)
+    ) as client:
+        resp = await client.get(f"/api/attachments/{att_id}")
+        assert resp.status == 200
+        assert int(resp.headers["Content-Length"]) == len(test_content)
+        # Read the streamed body and verify it matches
+        body = await resp.read()
+        assert body == test_content

@@ -190,8 +190,14 @@ class TestTokenFileLoading:
             }],
         }))
 
-        # Patch _config on the server module to point at our tmp_path
-        _server_mod._config = {"auth": {"file_path": str(tmp_path / "auth.json")}}
+        # Patch config on the server module so get_expanded_paths() uses our tmp_path
+        _server_mod.config = type("MockConfig", (), {
+            "get_expanded_paths": lambda self: {
+                "auth_file": tmp_path / "auth.json",
+                "config_dir": tmp_path,
+                "attachments_dir": tmp_path / "attachments",
+            },
+        })()
         _server_mod._load_setup_tokens_from_disk()
 
         # Token should be loaded
@@ -219,7 +225,13 @@ class TestTokenFileLoading:
             }],
         }))
 
-        _server_mod._config = {"auth": {"file_path": str(tmp_path / "auth.json")}}
+        _server_mod.config = type("MockConfig", (), {
+            "get_expanded_paths": lambda self: {
+                "auth_file": tmp_path / "auth.json",
+                "config_dir": tmp_path,
+                "attachments_dir": tmp_path / "attachments",
+            },
+        })()
         _server_mod._load_setup_tokens_from_disk()
 
         assert "old-token" not in _server_mod._SETUP_TOKENS

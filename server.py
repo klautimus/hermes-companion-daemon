@@ -120,7 +120,20 @@ def _load_setup_tokens_from_disk():
         # After loading, delete the file (tokens are single-use and ephemeral)
         token_file.unlink()
     except Exception as e:
-        logger.warning("Failed to load setup_token.json: %s", e)
+        logger.warning("Failed to load setup_tokens.json: %s", e)
+
+
+def _sanitized_error_response(err: str, code: str, fallback: str, request_id: str = None) -> dict:
+    """Log full stderr server-side, return generic fallback + request_id to client.
+
+    Prevents leaking internal paths, stack traces, or subprocess output to
+    API clients while preserving full diagnostics in server logs.
+    """
+    logger.error("Subprocess error [%s] (request_id=%s): %s", code, request_id, err)
+    msg = fallback
+    if request_id:
+        msg += f" (request_id: {request_id})"
+    return {"error": {"code": code, "message": msg}}
 
 
 # ── Auth ────────────────────────────────────────────────────
@@ -413,7 +426,7 @@ async def handle_kanban_boards(request: web.Request) -> web.Response:
     code, out, err = _kanban(["boards", "list", "--json"])
     if code != 0:
         return web.json_response(
-            {"error": {"code": "INTERNAL_ERROR", "message": err or "Failed to list boards"}},
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to list boards"),
             status=500,
         )
     try:
@@ -439,7 +452,7 @@ async def handle_kanban_tasks_list(request: web.Request) -> web.Response:
     code, out, err = _kanban(args, board=board)
     if code != 0:
         return web.json_response(
-            {"error": {"code": "INTERNAL_ERROR", "message": err or "Failed to list tasks"}},
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to list tasks"),
             status=500,
         )
     try:
@@ -454,7 +467,7 @@ async def handle_kanban_task_show(request: web.Request) -> web.Response:
     code, out, err = _kanban(["show", "--json", task_id], board=board)
     if code != 0:
         return web.json_response(
-            {"error": {"code": "NOT_FOUND", "message": err or "Task not found"}},
+             _sanitized_error_response(err, "NOT_FOUND", "Task not found"),
             status=404,
         )
     try:
@@ -476,7 +489,7 @@ async def handle_kanban_task_complete(request: web.Request) -> web.Response:
     code, _, err = _kanban(args, board=board)
     if code != 0:
         return web.json_response(
-            {"error": {"code": "INTERNAL_ERROR", "message": err or "Failed to complete task"}},
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to complete task"),
             status=500,
         )
     return web.json_response({"ok": True, "task_id": task_id, "status": "done"})
@@ -505,7 +518,7 @@ async def handle_kanban_task_comment(request: web.Request) -> web.Response:
     code, _, err = _kanban(["comment", task_id, body["text"], "--author", author], board=board)
     if code != 0:
         return web.json_response(
-            {"error": {"code": "INTERNAL_ERROR", "message": err or "Failed to comment"}},
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to comment"),
             status=500,
         )
     return web.json_response({"ok": True})
@@ -552,7 +565,7 @@ async def handle_kanban_boards_create(request: web.Request) -> web.Response:
     code, out, err = _kanban(["boards", "create", "--slug", slug, "--name", name])
     if code != 0:
         return web.json_response(
-            {"error": {"code": "INTERNAL_ERROR", "message": err or "Failed to create board"}},
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to create board"),
             status=500,
         )
     return web.json_response({"ok": True, "slug": slug, "name": name}, status=201)
@@ -575,7 +588,7 @@ async def handle_kanban_board_rename(request: web.Request) -> web.Response:
     code, _, err = _kanban(["boards", "rename", slug, "--name", new_name])
     if code != 0:
         return web.json_response(
-            {"error": {"code": "INTERNAL_ERROR", "message": err or "Failed to rename board"}},
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to rename board"),
             status=500,
         )
     return web.json_response({"ok": True})
@@ -587,7 +600,7 @@ async def handle_kanban_board_archive(request: web.Request) -> web.Response:
     code, _, err = _kanban(["boards", "archive", slug])
     if code != 0:
         return web.json_response(
-            {"error": {"code": "INTERNAL_ERROR", "message": err or "Failed to archive board"}},
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to archive board"),
             status=500,
         )
     return web.json_response({"ok": True})
@@ -604,7 +617,7 @@ async def handle_kanban_board_delete(request: web.Request) -> web.Response:
     code, _, err = _kanban(["boards", "delete", slug])
     if code != 0:
         return web.json_response(
-            {"error": {"code": "INTERNAL_ERROR", "message": err or "Failed to delete board"}},
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to delete board"),
             status=500,
         )
     return web.json_response({"ok": True})
@@ -628,7 +641,7 @@ async def handle_kanban_task_assign(request: web.Request) -> web.Response:
     code, _, err = _kanban(["assign", task_id, assignee], board=board)
     if code != 0:
         return web.json_response(
-            {"error": {"code": "INTERNAL_ERROR", "message": err or "Failed to assign task"}},
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to assign task"),
             status=500,
         )
     return web.json_response({"ok": True, "task_id": task_id, "assignee": assignee})

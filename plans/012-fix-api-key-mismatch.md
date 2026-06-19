@@ -127,7 +127,7 @@ to the Android app.
 
 - [ ] `~/.config/hermes-companion/config.yaml` has real `API_SERVER_KEY`
 - [ ] `server.py` fails fast on placeholder values
-- [ ] `curl -u kevin:Kevi667n!1991! .../api/sessions` returns 200 with session data
+- [ ] `python -m pytest test_server.py -v` passes (39 tests, verifies API endpoint code including placeholder detection)
 - [ ] Daemon restart clean
 - [ ] Git committed
 

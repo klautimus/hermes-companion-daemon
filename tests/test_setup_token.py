@@ -210,7 +210,7 @@ class TestTokenFileLoading:
         assert not token_file.exists()
 
     def test_load_skips_expired_tokens(self, tmp_path):
-        """Tokens older than 5 minutes are skipped."""
+        """Tokens older than 5 minutes are loaded but return 410 EXPIRED (not 404 NOT_FOUND)."""
         from datetime import datetime, timezone, timedelta
 
         token_file = tmp_path / "setup_token.json"
@@ -221,6 +221,8 @@ class TestTokenFileLoading:
                 "username": "admin",
                 "password": "pw",
                 "board": "default",
+                "host": "127.0.0.1",
+                "port": 8777,
                 "created_at": old_time,
             }],
         }))
@@ -234,7 +236,9 @@ class TestTokenFileLoading:
         })()
         _server_mod._load_setup_tokens_from_disk()
 
-        assert "old-token" not in _server_mod._SETUP_TOKENS
+        # Expired tokens ARE loaded (so they return 410 not 404)
+        assert "old-token" in _server_mod._SETUP_TOKENS
+        assert _server_mod._SETUP_TOKENS["old-token"]["expires_at"] < time.time()
         # File still deleted even if all tokens expired
         assert not token_file.exists()
 

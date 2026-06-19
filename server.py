@@ -76,12 +76,14 @@ _SETUP_REDEEM_LOCKOUT_THRESHOLD = 10
 _SETUP_REDEEM_LOCKOUT_DURATION = 60  # seconds
 
 
-async def register_setup_token(token: str, username: str, password: str, board: str = "default", ttl_seconds: int = 300):
+async def register_setup_token(token: str, username: str, password: str, board: str = "default", ttl_seconds: int = 300, host: str = "127.0.0.1", port: int = 8777):
     async with _setup_tokens_lock:
         _SETUP_TOKENS[token] = {
             "username": username,
             "password": password,
             "board": board,
+            "host": host,
+            "port": port,
             "expires_at": time.time() + ttl_seconds,
         }
 
@@ -101,18 +103,18 @@ def _load_setup_tokens_from_disk():
         if not token_file.exists():
             return
         raw = json.loads(token_file.read_text())
-        now = time.time()
         for entry in raw.get("tokens", []):
             try:
                 created = datetime.fromisoformat(entry["created_at"]).timestamp()
-                age = now - created
-                if age > 300:
-                    continue
                 expires_at = created + 300
+                # Load all tokens including expired ones (expired ones will have expires_at in the past)
+                # This ensures they return 410 EXPIRED instead of 404 NOT_FOUND
                 _SETUP_TOKENS[entry["token"]] = {
                     "username": entry["username"],
                     "password": entry["password"],
                     "board": entry.get("board", "default"),
+                    "host": entry.get("host", "127.0.0.1"),
+                    "port": entry.get("port", 8777),
                     "expires_at": expires_at,
                 }
             except Exception as e:
@@ -794,6 +796,8 @@ async def handle_setup_redeem(request):
     return web.json_response({
         "username": entry["username"],
         "password": entry["password"],
+        "host": entry["host"],
+        "port": entry["port"],
         "board": entry["board"],
     })
 

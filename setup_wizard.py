@@ -255,6 +255,8 @@ def register_setup_token_wizard(token: str, username: str, password: str, config
             "username": username,
             "password": password,
             "board": "default",
+            "host": config.server.host,
+            "port": config.server.port,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }],
     }, indent=2))

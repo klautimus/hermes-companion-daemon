@@ -316,19 +316,38 @@ class TestRenderQrAscii:
         # When qrcode is not available, the function returns a fallback message
         # The current implementation catches ImportError and returns a message
         import setup_wizard
-        # Temporarily remove qrcode from modules
         import sys
-        saved = sys.modules.pop("qrcode", None)
+
+        # Block qrcode from being imported by intercepting sys.meta_path.
+        # Just popping sys.modules isn't enough — Python's import machinery
+        # will still find qrcode on sys.path (e.g. from .venv-audit).
+        class _BlockQrcode:
+            def find_module(self, name, path=None):
+                if name == "qrcode":
+                    return self
+                return None
+
+            def load_module(self, name):
+                raise ImportError("No module named 'qrcode'")
+
+            def find_spec(self, name, path=None, target=None):
+                if name == "qrcode":
+                    raise ImportError("No module named 'qrcode'")
+                return None
+
+        blocker = _BlockQrcode()
+        saved_module = sys.modules.pop("qrcode", None)
+        sys.meta_path.insert(0, blocker)
         try:
-            # Re-import to get the fallback path
             import importlib
             importlib.reload(setup_wizard)
             uri = "hermescompanion://configure?url=http://x&user=a&token=b&board=d"
             text = setup_wizard.render_qr_ascii(uri)
             assert "QR code" in text or "qrcode" in text.lower()
         finally:
-            if saved:
-                sys.modules["qrcode"] = saved
+            sys.meta_path.pop(0)
+            if saved_module:
+                sys.modules["qrcode"] = saved_module
 
 
 # ── Prompt helpers ──────────────────────────────────────────────

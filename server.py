@@ -8,6 +8,8 @@ Provides:
   - Health endpoint (/healthz)
 """
 
+import shutil
+
 import asyncio
 import atexit
 import base64
@@ -55,7 +57,7 @@ paths = config.get_expanded_paths()
 AUTH_FILE = paths["auth_file"]
 HERMES_BIN = config.hermes.cli_path
 if HERMES_BIN == "auto":
-    HERMES_BIN = "/home/kevin/.hermes/hermes-agent/venv/bin/hermes"
+    HERMES_BIN = shutil.which("hermes") or "hermes"
 
 ATTACHMENTS_DIR = paths["attachments_dir"]
 MAX_UPLOAD_SIZE = config.storage.max_upload_size

@@ -257,7 +257,7 @@ class BasicAuth:
 
     @web.middleware
     async def middleware(self, request, handler):
-        if request.path in ("/healthz", "/health", "/api/setup/redeem"):
+        if request.path in ("/healthz", "/health", "/api/setup/redeem", "/api/setup/register"):
             return await handler(request)
         if not await self.check(request):
             return web.json_response(
@@ -798,14 +798,69 @@ async def handle_setup_redeem(request):
     })
 
 
+# ── Setup Handlers ───────────────────────────────────────────
+async def handle_setup_register(request):
+    """Create the first user account. Only works when no users exist."""
+    import json as _json
+    import hashlib, base64, secrets
+
+    config = request.app["config"]
+    paths = config.get_expanded_paths()
+    auth_file = paths["auth_file"]
+
+    # Read existing auth.json
+    try:
+        auth_data = _json.loads(auth_file.read_text())
+    except (FileNotFoundError, _json.JSONDecodeError):
+        auth_data = {"users": {}}
+
+    # SECURITY: Only allow registration if no users exist
+    if auth_data.get("users"):
+        return web.json_response(
+            {"error": {"message": "Registration is closed. Ask your administrator for credentials."}},
+            status=403
+        )
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": {"message": "Invalid JSON body"}}, status=400)
+
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+
+    if not username or not password:
+        return web.json_response({"error": {"message": "Username and password are required"}}, status=400)
+    if len(username) < 3 or len(password) < 8:
+        return web.json_response({"error": {"message": "Username must be >=3 chars, password >=8 chars"}}, status=400)
+
+    # Hash password with scrypt (same format as server.py BasicAuth)
+    salt = secrets.token_bytes(16)
+    hash_bytes = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
+    b64hash = base64.b64encode(hash_bytes).decode()
+    password_hash = f"scrypt$16384$8$1${salt.hex()}${b64hash}"
+
+    auth_data = {"users": {username: {"password_hash": password_hash, "created_at": "2026-01-01"}}}
+    auth_file.parent.mkdir(parents=True, exist_ok=True)
+    auth_file.write_text(_json.dumps(auth_data, indent=2))
+    auth_file.chmod(0o600)
+
+    return web.json_response({"status": "ok", "message": f"User '{username}' created"}, status=201)
+
+
 # ── App Setup ────────────────────────────────────────────────
 async def create_app() -> web.Application:
     auth = BasicAuth(AUTH_FILE)
     app = web.Application(middlewares=[auth.middleware, security_headers_middleware])
+    app["config"] = config
 
     # Health
     app.router.add_get("/healthz", handle_healthz)
     app.router.add_get("/health", handle_healthz)
+
+    # Setup routes (unauthenticated — must be registered before auth middleware check)
+    app.router.add_post("/api/setup/register", handle_setup_register)
+    app.router.add_post("/api/setup/redeem", handle_setup_redeem)
 
     # Session passthrough
     app.router.add_get("/api/sessions", handle_sessions_list)
@@ -832,9 +887,6 @@ async def create_app() -> web.Application:
     # Attachments
     app.router.add_post("/api/attachments", handle_attachment_upload)
     app.router.add_get("/api/attachments/{att_id}", handle_attachment_serve)
-
-    # Setup token redeem
-    app.router.add_post("/api/setup/redeem", handle_setup_redeem)
 
     async def _cleanup_session(app):
         if HermesProxy._session is not None and not HermesProxy._session.closed:

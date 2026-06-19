@@ -22,3 +22,4 @@ attachments/
 .venv-audit/
 *.egg-info/
 setup_token.json
+.codegraph/

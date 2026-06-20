@@ -528,6 +528,78 @@ async def handle_chat_proxy(request: web.Request) -> web.Response:
     return await _forward_chat(request, modified_body)
 
 
+# Chat streaming proxy — SSE pipe to Hermes API
+async def handle_chat_stream(request: web.Request) -> web.StreamResponse:
+    """POST /v1/chat/completions/stream — stream chat via SSE.
+
+    Forwards to Hermes API with ``"stream": true`` and pipes SSE chunks
+    back to the client as they arrive.  ``attachment_ids`` and
+    ``session_id`` are handled identically to ``handle_chat_proxy``.
+    """
+    body = await request.read()
+    modified_body = body
+    if body:
+        try:
+            payload = json.loads(body)
+            session_id = payload.pop("session_id", None)
+            att_ids = payload.pop("attachment_ids", None)
+            if session_id and att_ids:
+                _attachment_store.setdefault(session_id, []).extend(att_ids)
+            # Force streaming on the upstream request
+            payload["stream"] = True
+            modified_body = json.dumps(payload).encode("utf-8")
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    session = await HermesProxy.get_session()
+    url = f"{HERMES_API}/v1/chat/completions"
+    if request.query_string:
+        url += f"?{request.query_string}"
+    headers = dict(request.headers)
+    headers.pop("Host", None)
+    headers.pop("Authorization", None)
+    headers.pop("Content-Length", None)
+    headers.pop("Transfer-Encoding", None)
+    headers["Authorization"] = f"Bearer {API_KEY}"
+    headers["Accept"] = "text/event-stream"
+
+    resp = web.StreamResponse(status=200, reason="OK")
+    resp.headers["Content-Type"] = "text/event-stream"
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Connection"] = "keep-alive"
+    resp.headers["X-Accel-Buffering"] = "no"
+    await resp.prepare(request)
+
+    try:
+        upstream = await session.request(
+            request.method, url, headers=headers, data=modified_body or None,
+        )
+        if upstream.status != 200:
+            err_body = await upstream.read()
+            err_msg = err_body.decode("utf-8", errors="replace")
+            err_json = json.dumps({"error": {"code": "UPSTREAM_ERROR", "message": err_msg}})
+            await resp.write(f"data: {err_json}\n\n".encode())
+            await resp.write(b"data: [DONE]\n\n")
+            return resp
+
+        async for chunk in upstream.content:
+            if chunk:
+                await resp.write(chunk)
+                await resp.drain()
+    except Exception as e:
+        logger.error("Chat stream error: %s", e)
+        try:
+            await resp.write(
+                f"data: {json.dumps({'error': {'code': 'STREAM_ERROR', 'message': str(e)}})}\n\n".encode()
+            )
+        except Exception:
+            pass
+    finally:
+        await resp.write(b"data: [DONE]\n\n")
+
+    return resp
+
+
 # Kanban handlers
 async def handle_kanban_boards(request: web.Request) -> web.Response:
     code, out, err = _kanban(["boards", "list", "--json"])
@@ -1445,6 +1517,7 @@ async def create_app() -> web.Application:
 
     # Chat proxy
     app.router.add_post("/v1/chat/completions", handle_chat_proxy)
+    app.router.add_post("/v1/chat/completions/stream", handle_chat_stream)
 
     # Kanban
     app.router.add_get("/api/kanban/boards", handle_kanban_boards)

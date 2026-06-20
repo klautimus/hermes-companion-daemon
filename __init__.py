@@ -16,6 +16,7 @@ from .server import (
     handle_kanban_board_delete,
     handle_attachment_upload,
     handle_attachment_serve,
+    handle_chat_stream,
 )
 
 __all__ = [

@@ -229,45 +229,65 @@ class BasicAuth:
             return False
 
         phash = user.get("password_hash", "")
+        password_ok = False
         if not phash.startswith("scrypt$"):
             # Plaintext fallback — constant-time compare
-            if hmac.compare_digest(phash, password):
-                self._clear_failures(key)
-                self._clear_user_failures(username)
-                return True
+            password_ok = hmac.compare_digest(phash, password)
+        else:
+            try:
+                _, n, r, p, salt_hex, expected = phash.split("$", 5)
+                n, r, p = int(n), int(r), int(p)
+                salt_bytes = bytes.fromhex(salt_hex)
+                hash_bytes = hashlib.scrypt(
+                    password.encode(), salt=salt_bytes, n=n, r=r, p=p, dklen=32,
+                )
+                computed = base64.b64encode(hash_bytes).decode()
+                password_ok = hmac.compare_digest(computed, expected)
+            except Exception:
+                password_ok = False
+
+        if not password_ok:
             self._record_failure(key)
             self._record_user_failure(username)
             return False
 
-        try:
-            _, n, r, p, salt_hex, expected = phash.split("$", 5)
-            n, r, p = int(n), int(r), int(p)
-            salt_bytes = bytes.fromhex(salt_hex)
-            hash_bytes = hashlib.scrypt(
-                password.encode(), salt=salt_bytes, n=n, r=r, p=p, dklen=32,
-            )
-            computed = base64.b64encode(hash_bytes).decode()
-            if hmac.compare_digest(computed, expected):
-                self._clear_failures(key)
-                self._clear_user_failures(username)
+        # Password is correct — check if 2FA is enabled
+        self._clear_failures(key)
+        self._clear_user_failures(username)
+
+        if user.get("two_factor_enabled"):
+            # Generate a 2FA challenge and return it
+            try:
+                from email_2fa import generate_challenge, send_otp
+
+                email = user.get("email", username)
+                challenge_id = generate_challenge(email)
+                send_otp(challenge_id)
+            except Exception as e:
+                logger.error("2FA challenge generation failed for %s: %s", username, e)
+                # Fall back to allowing login if 2FA system is broken
+                # (better to let the admin in than lock them out)
                 return True
-            self._record_failure(key)
-            self._record_user_failure(username)
-            return False
-        except Exception:
-            self._record_failure(key)
-            self._record_user_failure(username)
-            return False
+            return {"requires_2fa": True, "challenge_id": challenge_id}
+
+        return True
 
     @web.middleware
     async def middleware(self, request, handler):
-        if request.path in ("/healthz", "/health", "/api/setup/redeem", "/api/setup/register"):
+        if request.path in (
+            "/healthz", "/health", "/api/setup/redeem", "/api/setup/register",
+            "/api/auth/2fa/verify", "/api/auth/2fa/setup",
+            "/api/auth/2fa/disable", "/api/auth/2fa/resend",
+        ):
             return await handler(request)
-        if not await self.check(request):
+        result = await self.check(request)
+        if result is False:
             return web.json_response(
                 {"error": {"code": "UNAUTHORIZED", "message": "Invalid credentials"}},
                 status=401,
             )
+        if isinstance(result, dict) and result.get("requires_2fa"):
+            return web.json_response(result, status=200)
         return await handler(request)
 
 
@@ -1126,6 +1146,199 @@ async def handle_setup_register(request):
     return web.json_response({"status": "ok", "message": f"User '{username}' created"}, status=201)
 
 
+# ── 2FA Handlers ──────────────────────────────────────────────
+
+async def handle_2fa_verify(request: web.Request) -> web.Response:
+    """POST /api/auth/2fa/verify — verify OTP code, return auth result."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "JSON body required"}},
+            status=400,
+        )
+    challenge_id = body.get("challenge_id", "")
+    code = body.get("code", "")
+    if not challenge_id or not code:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "challenge_id and code required"}},
+            status=422,
+        )
+
+    from email_2fa import verify_otp
+    if verify_otp(challenge_id, code):
+        return web.json_response({"status": "ok", "authenticated": True})
+    return web.json_response(
+        {"error": {"code": "INVALID_OTP", "message": "Invalid or expired code"}},
+        status=401,
+    )
+
+
+async def handle_2fa_setup(request: web.Request) -> web.Response:
+    """POST /api/auth/2fa/setup — enable 2FA for the authenticated user."""
+    import json as _json
+
+    config = request.app["config"]
+    paths = config.get_expanded_paths()
+    auth_file = paths["auth_file"]
+
+    try:
+        auth_data = _json.loads(auth_file.read_text())
+    except (FileNotFoundError, _json.JSONDecodeError):
+        auth_data = {"users": {}}
+
+    # Get username from Basic Auth header
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        return web.json_response(
+            {"error": {"code": "UNAUTHORIZED", "message": "Basic Auth required"}},
+            status=401,
+        )
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+        username, _, password = decoded.partition(":")
+    except Exception:
+        return web.json_response(
+            {"error": {"code": "UNAUTHORIZED", "message": "Invalid auth header"}},
+            status=401,
+        )
+
+    user = auth_data.get("users", {}).get(username)
+    if not user:
+        return web.json_response(
+            {"error": {"code": "NOT_FOUND", "message": "User not found"}},
+            status=404,
+        )
+
+    # Already enabled
+    if user.get("two_factor_enabled"):
+        return web.json_response(
+            {"error": {"code": "ALREADY_ENABLED", "message": "2FA already enabled"}},
+            status=409,
+        )
+
+    # Enable 2FA
+    user["two_factor_enabled"] = True
+    auth_file.write_text(_json.dumps(auth_data, indent=2))
+
+    logger.info("2FA enabled for user %s", username)
+    return web.json_response({"status": "ok", "message": "2FA enabled"})
+
+
+async def handle_2fa_disable(request: web.Request) -> web.Response:
+    """POST /api/auth/2fa/disable — disable 2FA (requires OTP verification first)."""
+    import json as _json
+
+    config = request.app["config"]
+    paths = config.get_expanded_paths()
+    auth_file = paths["auth_file"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "JSON body required"}},
+            status=400,
+        )
+
+    challenge_id = body.get("challenge_id", "")
+    code = body.get("code", "")
+
+    # Require OTP verification before disabling
+    if challenge_id and code:
+        from email_2fa import verify_otp
+        if not verify_otp(challenge_id, code):
+            return web.json_response(
+                {"error": {"code": "INVALID_OTP", "message": "Invalid or expired code"}},
+                status=401,
+            )
+    else:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "challenge_id and code required"}},
+            status=422,
+        )
+
+    try:
+        auth_data = _json.loads(auth_file.read_text())
+    except (FileNotFoundError, _json.JSONDecodeError):
+        auth_data = {"users": {}}
+
+    # Get username from Basic Auth header
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        return web.json_response(
+            {"error": {"code": "UNAUTHORIZED", "message": "Basic Auth required"}},
+            status=401,
+        )
+    try:
+        decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+        username, _, _ = decoded.partition(":")
+    except Exception:
+        return web.json_response(
+            {"error": {"code": "UNAUTHORIZED", "message": "Invalid auth header"}},
+            status=401,
+        )
+
+    user = auth_data.get("users", {}).get(username)
+    if not user:
+        return web.json_response(
+            {"error": {"code": "NOT_FOUND", "message": "User not found"}},
+            status=404,
+        )
+
+    user["two_factor_enabled"] = False
+    auth_file.write_text(_json.dumps(auth_data, indent=2))
+
+    logger.info("2FA disabled for user %s", username)
+    return web.json_response({"status": "ok", "message": "2FA disabled"})
+
+
+async def handle_2fa_resend(request: web.Request) -> web.Response:
+    """POST /api/auth/2fa/resend — resend OTP for an existing challenge."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "JSON body required"}},
+            status=400,
+        )
+    challenge_id = body.get("challenge_id", "")
+    if not challenge_id:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "challenge_id required"}},
+            status=422,
+        )
+
+    from email_2fa import _pending_challenges, generate_challenge, send_otp
+
+    challenge = _pending_challenges.get(challenge_id)
+    if challenge is None:
+        return web.json_response(
+            {"error": {"code": "NOT_FOUND", "message": "Challenge not found or expired"}},
+            status=404,
+        )
+
+    # Check if expired
+    if time.time() > challenge["expires"]:
+        _pending_challenges.pop(challenge_id, None)
+        return web.json_response(
+            {"error": {"code": "EXPIRED", "message": "Challenge expired, start a new login"}},
+            status=410,
+        )
+
+    # Resend the same code
+    try:
+        send_otp(challenge_id)
+    except Exception as e:
+        logger.error("2FA resend failed: %s", e)
+        return web.json_response(
+            {"error": {"code": "SEND_FAILED", "message": "Failed to resend code"}},
+            status=500,
+        )
+
+    return web.json_response({"status": "ok", "message": "Code resent"})
+
+
 # ── App Setup ────────────────────────────────────────────────
 async def create_app() -> web.Application:
     auth = BasicAuth(AUTH_FILE)
@@ -1175,6 +1388,12 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/kanban/tasks/{task_id}/archive", handle_kanban_task_archive)
     app.router.add_post("/api/kanban/tasks/{task_id}/reclaim", handle_kanban_task_reclaim)
     app.router.add_post("/api/kanban/tasks/{task_id}/decompose", handle_kanban_task_decompose)
+
+    # 2FA Auth (Plan 017)
+    app.router.add_post("/api/auth/2fa/verify", handle_2fa_verify)
+    app.router.add_post("/api/auth/2fa/setup", handle_2fa_setup)
+    app.router.add_post("/api/auth/2fa/disable", handle_2fa_disable)
+    app.router.add_post("/api/auth/2fa/resend", handle_2fa_resend)
 
     # Attachments
     app.router.add_post("/api/attachments", handle_attachment_upload)

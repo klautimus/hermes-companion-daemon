@@ -651,6 +651,211 @@ async def handle_kanban_task_assign(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "task_id": task_id, "assignee": assignee})
 
 
+async def handle_kanban_task_create(request: web.Request) -> web.Response:
+    """POST /api/kanban/tasks — create a new task."""
+    board = request.query.get("board", "")
+    if not board:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "?board= required"}},
+            status=422,
+        )
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    title = body.get("title", "")
+    if not title:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "title required"}},
+            status=422,
+        )
+    task_body = body.get("body", "")
+    assignee = body.get("assignee", "")
+    priority = body.get("priority", 0)
+    status = body.get("status", "todo")
+
+    cmd = ["create", title, "--json"]
+    if task_body:
+        cmd.extend(["--body", json.dumps(task_body) if isinstance(task_body, dict) else task_body])
+    if assignee:
+        cmd.extend(["--assignee", assignee])
+    if priority:
+        cmd.extend(["--priority", str(priority)])
+    if status and status != "todo":
+        if status == "blocked":
+            cmd.extend(["--initial-status", "blocked"])
+
+    code, out, err = _kanban(cmd, board=board)
+    if code != 0:
+        return web.json_response(
+            _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to create task"),
+            status=500,
+        )
+    try:
+        data = json.loads(out)
+        return web.json_response(data, status=201)
+    except json.JSONDecodeError:
+        return web.json_response({"ok": True, "title": title}, status=201)
+
+
+async def handle_kanban_task_edit(request: web.Request) -> web.Response:
+    """PATCH /api/kanban/tasks/{task_id} — update task fields."""
+    task_id = request.match_info["task_id"]
+    board = request.query.get("board", "")
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    # Apply assignee change via 'assign' subcommand
+    assignee = body.get("assignee")
+    if assignee is not None:
+        code, _, err = _kanban(["assign", task_id, assignee], board=board)
+        if code != 0:
+            return web.json_response(
+                _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to assign task"),
+                status=500,
+            )
+
+    # Apply status=complete via 'complete' subcommand
+    status = body.get("status")
+    if status == "done":
+        code, out, err = _kanban(["complete", task_id, "--json"], board=board)
+        if code != 0:
+            return web.json_response(
+                _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to complete task"),
+                status=500,
+            )
+        try:
+            data = json.loads(out)
+            return web.json_response(data)
+        except json.JSONDecodeError:
+            return web.json_response({"ok": True, "task_id": task_id, "status": "done"})
+
+    # Other field updates (title, body, priority) — use 'edit' with available flags
+    edit_args = ["edit", task_id]
+    if "title" in body:
+        edit_args.extend(["--title", str(body["title"])])
+    if "body" in body:
+        val = json.dumps(body["body"]) if isinstance(body["body"], dict) else str(body["body"])
+        edit_args.extend(["--body", val])
+    if "priority" in body:
+        edit_args.extend(["--priority", str(body["priority"])])
+    if "status" in body and status != "done":
+        edit_args.extend(["--status", str(body["status"])])
+
+    # Only call edit if there are edit-specific args beyond "edit <task_id>"
+    if len(edit_args) > 2:
+        code, _, err = _kanban(edit_args, board=board)
+        if code != 0:
+            return web.json_response(
+                _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to update task"),
+                status=500,
+            )
+
+    # Return updated task
+    code, out, err = _kanban(["show", "--json", task_id], board=board)
+    if code != 0:
+        return web.json_response({"ok": True, "task_id": task_id})
+    try:
+        data = json.loads(out)
+        if isinstance(data, dict) and "task" in data:
+            data = data["task"]
+        return web.json_response(data)
+    except json.JSONDecodeError:
+        return web.json_response({"ok": True, "task_id": task_id})
+
+
+async def handle_kanban_task_delete(request: web.Request) -> web.Response:
+    """DELETE /api/kanban/tasks/{task_id} — archive (soft-delete) a task."""
+    task_id = request.match_info["task_id"]
+    board = request.query.get("board", "")
+    code, _, err = _kanban(["archive", task_id], board=board)
+    if code != 0:
+        return web.json_response(
+            _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to archive task"),
+            status=500,
+        )
+    return web.json_response({"ok": True, "task_id": task_id, "status": "archived"})
+
+
+async def handle_kanban_task_bulk(request: web.Request) -> web.Response:
+    """POST /api/kanban/tasks/bulk — apply action to multiple tasks."""
+    board = request.query.get("board", "")
+    if not board:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "?board= required"}},
+            status=422,
+        )
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    task_ids = body.get("task_ids", [])
+    if not task_ids:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "task_ids required"}},
+            status=422,
+        )
+    action = body.get("action", "")
+    value = body.get("value", "")
+    if action not in ("set_status", "set_assignee"):
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "action must be 'set_status' or 'set_assignee'"}},
+            status=422,
+        )
+
+    affected = 0
+    failed = []
+    for task_id in task_ids:
+        if action == "set_status" and value == "done":
+            cmd = ["complete", task_id]
+        elif action == "set_assignee":
+            cmd = ["assign", task_id, value]
+        else:
+            cmd = []
+        if cmd:
+            code, _, _ = _kanban(cmd, board=board)
+            if code == 0:
+                affected += 1
+            else:
+                failed.append(task_id)
+
+    return web.json_response({
+        "ok": True,
+        "affected": affected,
+        "total": len(task_ids),
+        "failed": failed,
+    })
+
+
+async def handle_kanban_link(request: web.Request) -> web.Response:
+    """POST /api/kanban/links — add a parent->child dependency."""
+    board = request.query.get("board", "")
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    parent_id = body.get("parent_id", "")
+    child_id = body.get("child_id", "")
+    if not parent_id or not child_id:
+        return web.json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "parent_id and child_id required"}},
+            status=422,
+        )
+    code, _, err = _kanban(["link", parent_id, child_id], board=board)
+    if code != 0:
+        return web.json_response(
+            _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to create link"),
+            status=500,
+        )
+    return web.json_response({"ok": True, "parent_id": parent_id, "child_id": child_id})
+
+
 async def handle_attachment_upload(request: web.Request) -> web.Response:
     """POST /api/attachments — upload a file attachment."""
     reader = await request.multipart()
@@ -889,6 +1094,13 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/kanban/tasks/{task_id}/complete", handle_kanban_task_complete)
     app.router.add_post("/api/kanban/tasks/{task_id}/comment", handle_kanban_task_comment)
     app.router.add_post("/api/kanban/tasks/{task_id}/assign", handle_kanban_task_assign)
+
+    # Kanban CRUD (Plan 015)
+    app.router.add_post("/api/kanban/tasks", handle_kanban_task_create)
+    app.router.add_patch("/api/kanban/tasks/{task_id}", handle_kanban_task_edit)
+    app.router.add_delete("/api/kanban/tasks/{task_id}", handle_kanban_task_delete)
+    app.router.add_post("/api/kanban/tasks/bulk", handle_kanban_task_bulk)
+    app.router.add_post("/api/kanban/links", handle_kanban_link)
 
     # Attachments
     app.router.add_post("/api/attachments", handle_attachment_upload)

@@ -528,6 +528,73 @@ async def handle_kanban_task_comment(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+# ─── Task Lifecycle (Plan 016) ─────────────────────────────────
+
+async def handle_kanban_task_block(request: web.Request) -> web.Response:
+    """POST /api/kanban/tasks/{task_id}/block — block a task."""
+    task_id = request.match_info["task_id"]
+    board = request.query.get("board", "")
+    code, _, err = _kanban(["block", task_id, "--json"], board=board)
+    if code != 0:
+        return web.json_response(
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to block task"),
+            status=500,
+        )
+    return web.json_response({"ok": True, "task_id": task_id, "status": "blocked"})
+
+
+async def handle_kanban_task_unblock(request: web.Request) -> web.Response:
+    """POST /api/kanban/tasks/{task_id}/unblock — unblock a task."""
+    task_id = request.match_info["task_id"]
+    board = request.query.get("board", "")
+    code, _, err = _kanban(["unblock", task_id, "--json"], board=board)
+    if code != 0:
+        return web.json_response(
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to unblock task"),
+            status=500,
+        )
+    return web.json_response({"ok": True, "task_id": task_id, "status": "ready"})
+
+
+async def handle_kanban_task_archive(request: web.Request) -> web.Response:
+    """POST /api/kanban/tasks/{task_id}/archive — archive a task."""
+    task_id = request.match_info["task_id"]
+    board = request.query.get("board", "")
+    code, _, err = _kanban(["archive", task_id, "--json"], board=board)
+    if code != 0:
+        return web.json_response(
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to archive task"),
+            status=500,
+        )
+    return web.json_response({"ok": True, "task_id": task_id, "status": "archived"})
+
+
+async def handle_kanban_task_reclaim(request: web.Request) -> web.Response:
+    """POST /api/kanban/tasks/{task_id}/reclaim — reclaim an archived task."""
+    task_id = request.match_info["task_id"]
+    board = request.query.get("board", "")
+    code, _, err = _kanban(["reclaim", task_id, "--json"], board=board)
+    if code != 0:
+        return web.json_response(
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to reclaim task"),
+            status=500,
+        )
+    return web.json_response({"ok": True, "task_id": task_id, "status": "ready"})
+
+
+async def handle_kanban_task_decompose(request: web.Request) -> web.Response:
+    """POST /api/kanban/tasks/{task_id}/decompose — decompose a task into subtasks."""
+    task_id = request.match_info["task_id"]
+    board = request.query.get("board", "")
+    code, _, err = _kanban(["decompose", task_id, "--json"], board=board)
+    if code != 0:
+        return web.json_response(
+             _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to decompose task"),
+            status=500,
+        )
+    return web.json_response({"ok": True, "task_id": task_id, "status": "decomposed"})
+
+
 # ─── Missing Routes (I-01) ────────────────────────────────────
 
 async def handle_session_delete(request: web.Request) -> web.Response:
@@ -1101,6 +1168,13 @@ async def create_app() -> web.Application:
     app.router.add_delete("/api/kanban/tasks/{task_id}", handle_kanban_task_delete)
     app.router.add_post("/api/kanban/tasks/bulk", handle_kanban_task_bulk)
     app.router.add_post("/api/kanban/links", handle_kanban_link)
+
+    # Kanban Task Lifecycle (Plan 016)
+    app.router.add_post("/api/kanban/tasks/{task_id}/block", handle_kanban_task_block)
+    app.router.add_post("/api/kanban/tasks/{task_id}/unblock", handle_kanban_task_unblock)
+    app.router.add_post("/api/kanban/tasks/{task_id}/archive", handle_kanban_task_archive)
+    app.router.add_post("/api/kanban/tasks/{task_id}/reclaim", handle_kanban_task_reclaim)
+    app.router.add_post("/api/kanban/tasks/{task_id}/decompose", handle_kanban_task_decompose)
 
     # Attachments
     app.router.add_post("/api/attachments", handle_attachment_upload)

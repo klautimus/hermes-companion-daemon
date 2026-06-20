@@ -67,6 +67,10 @@ logger = logging.getLogger("companion")
 
 STARTED_AT = time.monotonic()
 
+# ── Attachment→Session Mapping ────────────────────────────────
+# Stores attachment IDs keyed by session_id for injection into message history.
+_attachment_store: dict[str, list[str]] = {}
+
 # ── Setup Token Store ─────────────────────────────────────────
 # One-time setup tokens. Each entry: {"username": str, "password": str, "board": str, "expires_at": float}
 _SETUP_TOKENS: dict[str, dict] = {}
@@ -357,6 +361,39 @@ class HermesProxy:
             )
 
 
+async def _forward_chat(request: web.Request, body: bytes | None) -> web.Response:
+    """Forward a chat request to Hermes API with the given body.
+
+    Like HermesProxy.forward but accepts a pre-read body so the original
+    request body stream doesn't need to be re-read.
+    """
+    session = await HermesProxy.get_session()
+    url = f"{HERMES_API}/v1/chat/completions"
+    if request.query_string:
+        url += f"?{request.query_string}"
+    headers = dict(request.headers)
+    headers.pop("Host", None)
+    headers.pop("Authorization", None)
+    headers.pop("Content-Length", None)
+    headers.pop("Transfer-Encoding", None)
+    headers["Authorization"] = f"Bearer {API_KEY}"
+    try:
+        upstream = await session.request(
+            request.method, url, headers=headers, data=body or None,
+        )
+        data = await upstream.read()
+        ct = upstream.headers.get("Content-Type", "application/json")
+        if ";" in ct:
+            ct = ct.split(";")[0].strip()
+        return web.Response(body=data, status=upstream.status, content_type=ct)
+    except Exception as e:
+        logger.error("Hermes API error: %s", e)
+        return web.json_response(
+            {"error": {"code": "HERMES_DOWN", "message": "Hermes API unreachable"}},
+            status=503,
+        )
+
+
 @atexit.register
 def _close_hermes_proxy_session():
     """Close the HermesProxy session on daemon shutdown."""
@@ -436,13 +473,59 @@ async def handle_session_detail(request: web.Request) -> web.Response:
 
 async def handle_session_messages(request: web.Request) -> web.Response:
     sid = request.match_info["session_id"]
-    return await HermesProxy.forward(request, f"/api/sessions/{sid}/messages")
+    resp = await HermesProxy.forward(request, f"/api/sessions/{sid}/messages")
+    # Inject attachment URLs for sessions that have attachments
+    if sid in _attachment_store and resp.status == 200:
+        try:
+            body_bytes = resp.body
+            if body_bytes is None:
+                return resp
+            if isinstance(body_bytes, (bytearray, memoryview)):
+                body_bytes = bytes(body_bytes)
+            if not isinstance(body_bytes, bytes):
+                return resp
+            data = json.loads(body_bytes.decode("utf-8"))
+            atts = _attachment_store.get(sid, [])
+            if atts:
+                # Inject attachment_url into the last user message
+                if "data" in data and isinstance(data["data"], list):
+                    for msg in reversed(data["data"]):
+                        if msg.get("role") == "user":
+                            att_id = atts[0]
+                            msg["attachment_url"] = f"/api/attachments/{att_id}"
+                            break
+                # Also expose full attachments list at top level
+                data["attachments"] = [
+                    {"id": aid, "url": f"/api/attachments/{aid}"}
+                    for aid in atts
+                ]
+            return web.json_response(data, status=resp.status)
+        except Exception:
+            pass
+    return resp
 
 
 # Chat proxy — forward to Hermes API /v1/chat/completions
 async def handle_chat_proxy(request: web.Request) -> web.Response:
-    """POST /v1/chat/completions — proxy to Hermes API with Bearer auth."""
-    return await HermesProxy.forward(request, "/v1/chat/completions")
+    """POST /v1/chat/completions — proxy to Hermes API with Bearer auth.
+
+    If the request body includes 'attachment_ids' and 'session_id',
+    stores the attachment→session mapping for later injection into
+    message history. Those fields are stripped before forwarding to Hermes.
+    """
+    body = await request.read()
+    modified_body = body
+    if body:
+        try:
+            payload = json.loads(body)
+            session_id = payload.pop("session_id", None)
+            att_ids = payload.pop("attachment_ids", None)
+            if session_id and att_ids:
+                _attachment_store.setdefault(session_id, []).extend(att_ids)
+            modified_body = json.dumps(payload).encode("utf-8")
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return await _forward_chat(request, modified_body)
 
 
 # Kanban handlers

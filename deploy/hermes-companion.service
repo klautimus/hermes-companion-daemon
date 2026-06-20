@@ -1,0 +1,15 @@
+[Unit]
+Description=Hermes Companion Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/kevin/.hermes/companion
+ExecStart=/home/kevin/.hermes/hermes-agent/venv/bin/python3 /home/kevin/.hermes/companion/server.py
+Restart=on-failure
+RestartSec=5
+Environment=HERMES_API=http://127.0.0.1:8642
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

@@ -57,7 +57,13 @@ paths = config.get_expanded_paths()
 AUTH_FILE = paths["auth_file"]
 HERMES_BIN = config.hermes.cli_path
 if HERMES_BIN == "auto":
-    HERMES_BIN = shutil.which("hermes") or "hermes"
+    # shutil.which fails under systemd (minimal PATH). Check known locations as fallback.
+    HERMES_BIN = (
+        shutil.which("hermes")
+        or os.path.expanduser("~/.hermes/hermes-agent/venv/bin/hermes")
+        or os.path.expanduser("~/.local/bin/hermes")
+        or "hermes"
+    )
 
 ATTACHMENTS_DIR = paths["attachments_dir"]
 MAX_UPLOAD_SIZE = config.storage.max_upload_size
@@ -869,6 +875,46 @@ async def handle_kanban_board_delete(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def handle_kanban_profiles(request: web.Request) -> web.Response:
+    """GET /api/kanban/profiles — list available worker profiles."""
+    import glob
+    profiles_dir = os.path.expanduser("~/.hermes/profiles")
+    profiles = []
+    if os.path.isdir(profiles_dir):
+        for entry in sorted(os.listdir(profiles_dir)):
+            full = os.path.join(profiles_dir, entry)
+            if os.path.isdir(full) and not entry.startswith("."):
+                profiles.append(entry)
+    if not profiles:
+        profiles = ["analyst", "ops", "research", "researcher", "writer"]
+    return web.json_response(profiles)
+
+
+async def handle_kanban_stats(request: web.Request) -> web.Response:
+    """GET /api/kanban/stats?board=<slug> — aggregate task counts by status."""
+    board = request.query.get("board", "")
+    code, out, err = _kanban(["list", "--json"], board=board)
+    if code != 0:
+        return web.json_response(
+            _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to compute stats"),
+            status=500,
+        )
+    try:
+        tasks = json.loads(out) if out else []
+        if isinstance(tasks, dict) and "tasks" in tasks:
+            tasks = tasks["tasks"]
+        counts: dict[str, int] = {}
+        for t in tasks:
+            s = t.get("status", "unknown")
+            counts[s] = counts.get(s, 0) + 1
+        return web.json_response({
+            "total": len(tasks),
+            "countsByStatus": counts,
+        })
+    except (json.JSONDecodeError, TypeError):
+        return web.json_response({"total": 0, "countsByStatus": {}})
+
+
 async def handle_kanban_task_assign(request: web.Request) -> web.Response:
     """POST /api/kanban/tasks/{task_id}/assign — assign a task."""
     task_id = request.match_info["task_id"]
@@ -1535,6 +1581,8 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/kanban/boards/{slug}/rename", handle_kanban_board_rename)
     app.router.add_post("/api/kanban/boards/{slug}/archive", handle_kanban_board_archive)
     app.router.add_delete("/api/kanban/boards/{slug}", handle_kanban_board_delete)
+    app.router.add_get("/api/kanban/profiles", handle_kanban_profiles)
+    app.router.add_get("/api/kanban/stats", handle_kanban_stats)
     app.router.add_get("/api/kanban/tasks", handle_kanban_tasks_list)
     app.router.add_get("/api/kanban/tasks/{task_id}", handle_kanban_task_show)
     app.router.add_post("/api/kanban/tasks/{task_id}/complete", handle_kanban_task_complete)

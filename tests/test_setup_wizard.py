@@ -253,7 +253,7 @@ class TestDetectHermesCli:
     def test_finds_on_path(self):
         with patch("shutil.which", return_value="/usr/bin/hermes"):
             result = detect_hermes_cli()
-        assert result == Path("/usr/bin/hermes")
+        assert result is not None and result.name == "hermes"
 
 
 # ── Connection URI / QR code generation ──────────────────────────

@@ -269,9 +269,7 @@ class BasicAuth:
                 send_otp(challenge_id)
             except Exception as e:
                 logger.error("2FA challenge generation failed for %s: %s", username, e)
-                # Fall back to allowing login if 2FA system is broken
-                # (better to let the admin in than lock them out)
-                return True
+                return {"error": "2FA_SYSTEM_ERROR", "message": "Two-factor authentication is enabled but the email system failed."}
             return {"requires_2fa": True, "challenge_id": challenge_id}
 
         return True
@@ -292,6 +290,8 @@ class BasicAuth:
             )
         if isinstance(result, dict) and result.get("requires_2fa"):
             return web.json_response(result, status=200)
+        if isinstance(result, dict) and result.get("error"):
+            return web.json_response(result, status=503)
         return await handler(request)
 
 
@@ -1448,6 +1448,16 @@ async def handle_2fa_disable(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "message": "2FA disabled"})
 
 
+async def handle_2fa_check(request: web.Request) -> web.Response:
+    """POST /api/auth/2fa/check — check if 2FA is required for the authenticated user.
+
+    This endpoint is reached only when the auth middleware does NOT intercept
+    (i.e., 2FA is not enabled for the user). If 2FA were enabled, the middleware
+    would have returned {requires_2fa: true} before reaching this handler.
+    """
+    return web.json_response({"requires_2fa": False})
+
+
 async def handle_2fa_resend(request: web.Request) -> web.Response:
     """POST /api/auth/2fa/resend — resend OTP for an existing challenge."""
     try:
@@ -1550,6 +1560,7 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/auth/2fa/setup", handle_2fa_setup)
     app.router.add_post("/api/auth/2fa/disable", handle_2fa_disable)
     app.router.add_post("/api/auth/2fa/resend", handle_2fa_resend)
+    app.router.add_post("/api/auth/2fa/check", handle_2fa_check)
 
     # Attachments
     app.router.add_post("/api/attachments", handle_attachment_upload)

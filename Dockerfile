@@ -28,6 +28,9 @@ RUN mkdir -p /data && chown -p companion:companion /data
 # Expose port
 EXPOSE 8777
 
+# Override host for Docker (must bind to 0.0.0.0 not 127.0.0.1)
+ENV COMPANION_HOST=0.0.0.0
+
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8777/healthz || exit 1

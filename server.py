@@ -715,7 +715,7 @@ async def handle_kanban_task_block(request: web.Request) -> web.Response:
     """POST /api/kanban/tasks/{task_id}/block — block a task."""
     task_id = request.match_info["task_id"]
     board = request.query.get("board", "")
-    code, _, err = _kanban(["block", task_id, "--json"], board=board)
+    code, _, err = _kanban(["block", task_id], board=board)
     if code != 0:
         return web.json_response(
              _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to block task"),
@@ -728,7 +728,7 @@ async def handle_kanban_task_unblock(request: web.Request) -> web.Response:
     """POST /api/kanban/tasks/{task_id}/unblock — unblock a task."""
     task_id = request.match_info["task_id"]
     board = request.query.get("board", "")
-    code, _, err = _kanban(["unblock", task_id, "--json"], board=board)
+    code, _, err = _kanban(["unblock", task_id], board=board)
     if code != 0:
         return web.json_response(
              _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to unblock task"),
@@ -741,7 +741,7 @@ async def handle_kanban_task_archive(request: web.Request) -> web.Response:
     """POST /api/kanban/tasks/{task_id}/archive — archive a task."""
     task_id = request.match_info["task_id"]
     board = request.query.get("board", "")
-    code, _, err = _kanban(["archive", task_id, "--json"], board=board)
+    code, _, err = _kanban(["archive", task_id], board=board)
     if code != 0:
         return web.json_response(
              _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to archive task"),
@@ -754,7 +754,7 @@ async def handle_kanban_task_reclaim(request: web.Request) -> web.Response:
     """POST /api/kanban/tasks/{task_id}/reclaim — reclaim an archived task."""
     task_id = request.match_info["task_id"]
     board = request.query.get("board", "")
-    code, _, err = _kanban(["reclaim", task_id, "--json"], board=board)
+    code, _, err = _kanban(["reclaim", task_id], board=board)
     if code != 0:
         return web.json_response(
              _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to reclaim task"),
@@ -987,6 +987,22 @@ async def handle_kanban_task_create(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "title": title}, status=201)
 
 
+def _kanban_db_update(task_id: str, field: str, value, board: str = "") -> bool:
+    """Direct SQLite update for fields the CLI doesn't support (title, body, priority, status for non-action transitions)."""
+    import sqlite3 as _sqlite3
+    db_path = os.path.expanduser("~/.hermes/kanban.db")
+    if not os.path.exists(db_path):
+        return False
+    try:
+        conn = _sqlite3.connect(db_path)
+        conn.execute(f"UPDATE tasks SET {field} = ? WHERE id = ?", (value, task_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
 async def handle_kanban_task_edit(request: web.Request) -> web.Response:
     """PATCH /api/kanban/tasks/{task_id} — update task fields."""
     task_id = request.match_info["task_id"]
@@ -1007,41 +1023,31 @@ async def handle_kanban_task_edit(request: web.Request) -> web.Response:
                 status=500,
             )
 
-    # Apply status=complete via 'complete' subcommand
+    # Route status changes to the correct CLI command
     status = body.get("status")
-    if status == "done":
-        code, out, err = _kanban(["complete", task_id, "--json"], board=board)
-        if code != 0:
-            return web.json_response(
-                _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to complete task"),
-                status=500,
-            )
-        try:
-            data = json.loads(out)
-            return web.json_response(data)
-        except json.JSONDecodeError:
-            return web.json_response({"ok": True, "task_id": task_id, "status": "done"})
+    if status is not None:
+        status_cmd_map = {
+            "done":     ["complete", task_id],
+            "blocked":  ["block", task_id],
+            "ready":    ["unblock", task_id],
+            "scheduled": ["schedule", task_id],
+            "archived": ["archive", task_id],
+        }
+        if status in status_cmd_map:
+            code, _, err = _kanban(status_cmd_map[status], board=board)
+            if code != 0:
+                return web.json_response(
+                    _sanitized_error_response(err, "INTERNAL_ERROR", f"Failed to set status to {status}"),
+                    status=500,
+                )
+        elif status in ("triage", "todo", "running", "review"):
+            # No dedicated CLI command for these — update DB directly
+            _kanban_db_update(task_id, "status", status, board)
 
-    # Other field updates (title, body, priority) — use 'edit' with available flags
-    edit_args = ["edit", task_id]
-    if "title" in body:
-        edit_args.extend(["--title", str(body["title"])])
-    if "body" in body:
-        val = json.dumps(body["body"]) if isinstance(body["body"], dict) else str(body["body"])
-        edit_args.extend(["--body", val])
-    if "priority" in body:
-        edit_args.extend(["--priority", str(body["priority"])])
-    if "status" in body and status != "done":
-        edit_args.extend(["--status", str(body["status"])])
-
-    # Only call edit if there are edit-specific args beyond "edit <task_id>"
-    if len(edit_args) > 2:
-        code, _, err = _kanban(edit_args, board=board)
-        if code != 0:
-            return web.json_response(
-                _sanitized_error_response(err, "INTERNAL_ERROR", "Failed to update task"),
-                status=500,
-            )
+    # Title, body, priority updates via direct DB edit (CLI 'edit' only supports --result/--summary)
+    for field in ("title", "body", "priority"):
+        if field in body:
+            _kanban_db_update(task_id, field, body[field], board)
 
     # Return updated task
     code, out, err = _kanban(["show", "--json", task_id], board=board)
